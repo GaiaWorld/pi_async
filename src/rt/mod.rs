@@ -29,8 +29,8 @@ use crossbeam_queue::ArrayQueue;
 use flume::{Sender as AsyncSender, Receiver as AsyncReceiver, bounded as async_bounded};
 use num_cpus;
 
-use hash::XHashMap;
-use local_timer::local_timer::LocalTimer;
+use pi_hash::XHashMap;
+use pi_local_timer::local_timer::LocalTimer;
 
 use single_thread::SingleTaskRuntime;
 use multi_thread::MultiTaskRuntime;
@@ -1039,7 +1039,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> AsyncTaskT
         AsyncTaskTimer {
             producor,
             consumer,
-            timer: Arc::new(RefCell::new(LocalTimer::<AsyncTimingTask<O, P>, 1000, 60, 60, 24>::new(1, (minstant::now() as f64 * minstant::nanos_per_cycle() / 1000000.0).trunc() as u64))),
+            timer: Arc::new(RefCell::new(LocalTimer::<AsyncTimingTask<O, P>, 1000, 60, 60, 24>::new(1, minstant::Instant::now().elapsed().as_millis() as u64))),
         }
     }
 
@@ -1049,7 +1049,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> AsyncTaskT
         AsyncTaskTimer {
             producor,
             consumer,
-            timer: Arc::new(RefCell::new(LocalTimer::<AsyncTimingTask<O, P>, 1000, 60, 60, 24>::new(time as u64, (minstant::now() as f64 * minstant::nanos_per_cycle() / 1000000.0).trunc() as u64))),
+            timer: Arc::new(RefCell::new(LocalTimer::<AsyncTimingTask<O, P>, 1000, 60, 60, 24>::new(time as u64, minstant::Instant::now().elapsed().as_millis() as u64))),
         }
     }
 
@@ -1093,7 +1093,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> AsyncTaskT
 
     /// 判断当前时间是否有可以弹出的任务，如果有可以弹出的任务，则返回当前时间，否则返回空
     pub fn is_require_pop(&self) -> Option<u64> {
-        let current_time = (minstant::now() as f64 * minstant::nanos_per_cycle() / 1000000.0).trunc() as u64;
+        let current_time = minstant::Instant::now().elapsed().as_millis() as u64;
         if self.timer.borrow().check_sleep(current_time) == 0 {
             Some(current_time)
         } else {
