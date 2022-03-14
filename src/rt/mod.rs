@@ -29,8 +29,8 @@ use crossbeam_queue::ArrayQueue;
 use flume::{Sender as AsyncSender, Receiver as AsyncReceiver, bounded as async_bounded};
 use num_cpus;
 
-use pi_hash::XHashMap;
-use pi_local_timer::local_timer::LocalTimer;
+use hash::XHashMap;
+use local_timer::local_timer::LocalTimer;
 
 use single_thread::SingleTaskRuntime;
 use multi_thread::MultiTaskRuntime;
@@ -89,6 +89,7 @@ unsafe impl<
 impl<
     O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>
 > ArcWake for AsyncTask<O, P> {
+    #[cfg(not(target_arch = "aarch64"))]
     fn wake_by_ref(arc_self: &Arc<Self>) {
         let pool = arc_self.get_pool();
         let _ = pool.push_keep(arc_self.clone());
@@ -124,6 +125,49 @@ impl<
                                                false,
                                                Ordering::SeqCst,
                                                Ordering::SeqCst) {
+                        //确认需要唤醒，则唤醒
+                        condvar.notify_one();
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        let pool = arc_self.get_pool();
+        let _ = pool.push_keep(arc_self.clone());
+
+        if let Some(waits) = pool.get_waits() {
+            //当前任务属于多线程异步运行时
+            if let Some(worker_waker) = waits.pop() {
+                //有待唤醒的工作者
+                let (is_sleep, lock, condvar) = &*worker_waker;
+                let locked = lock.lock();
+                if is_sleep.load(Ordering::Relaxed) {
+                    //待唤醒的工作者，正在休眠，则立即唤醒此工作者
+                    if let Ok(true) = is_sleep
+                        .compare_exchange(true,
+                                          false,
+                                          Ordering::SeqCst,
+                                          Ordering::SeqCst) {
+                        //确认需要唤醒，则唤醒
+                        condvar.notify_one();
+                    }
+                }
+            }
+        } else {
+            //当前线程属于单线程异步运行时
+            if let Some(thread_waker) = pool.get_thread_waker() {
+                //当前任务池绑定了所在线程的唤醒器，则快速检查是否需要唤醒所在线程
+                if thread_waker.0.load(Ordering::Relaxed) {
+                    let (is_sleep, lock, condvar) = &**thread_waker;
+                    let locked = lock.lock();
+                    //待唤醒的线程，正在休眠，则立即唤醒此线程
+                    if let Ok(true) = is_sleep
+                        .compare_exchange(true,
+                                          false,
+                                          Ordering::SeqCst,
+                                          Ordering::SeqCst) {
                         //确认需要唤醒，则唤醒
                         condvar.notify_one();
                     }
@@ -560,15 +604,28 @@ impl<
     pub fn close(&self) -> bool {
         match self {
             AsyncRuntime::Worker(worker_status, worker_waker, rt) => {
-                if let Ok(true) = worker_status.compare_exchange_weak(true,
-                                                                      false,
-                                                                      Ordering::SeqCst,
-                                                                      Ordering::SeqCst) {
-                    //设置工作者状态成功，检查运行时所在线程是否需要唤醒
-                    wakeup_worker_thread(worker_waker, rt);
-                    true
+                if cfg!(target_arch = "aarch64") {
+                    if let Ok(true) = worker_status.compare_exchange(true,
+                                                                     false,
+                                                                     Ordering::SeqCst,
+                                                                     Ordering::SeqCst) {
+                        //设置工作者状态成功，检查运行时所在线程是否需要唤醒
+                        wakeup_worker_thread(worker_waker, rt);
+                        true
+                    } else {
+                        false
+                    }
                 } else {
-                    false
+                    if let Ok(true) = worker_status.compare_exchange_weak(true,
+                                                                          false,
+                                                                          Ordering::SeqCst,
+                                                                          Ordering::SeqCst) {
+                        //设置工作者状态成功，检查运行时所在线程是否需要唤醒
+                        wakeup_worker_thread(worker_waker, rt);
+                        true
+                    } else {
+                        false
+                    }
                 }
             },
             _ => false,
@@ -982,7 +1039,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> AsyncTaskT
         AsyncTaskTimer {
             producor,
             consumer,
-            timer: Arc::new(RefCell::new(LocalTimer::<AsyncTimingTask<O, P>, 1000, 60, 60, 24>::new(1, minstant::Instant::now().elapsed().as_millis() as u64))),
+            timer: Arc::new(RefCell::new(LocalTimer::<AsyncTimingTask<O, P>, 1000, 60, 60, 24>::new(1, (minstant::now() as f64 * minstant::nanos_per_cycle() / 1000000.0).trunc() as u64))),
         }
     }
 
@@ -992,7 +1049,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> AsyncTaskT
         AsyncTaskTimer {
             producor,
             consumer,
-            timer: Arc::new(RefCell::new(LocalTimer::<AsyncTimingTask<O, P>, 1000, 60, 60, 24>::new(time as u64, minstant::Instant::now().elapsed().as_millis() as u64))),
+            timer: Arc::new(RefCell::new(LocalTimer::<AsyncTimingTask<O, P>, 1000, 60, 60, 24>::new(time as u64, (minstant::now() as f64 * minstant::nanos_per_cycle() / 1000000.0).trunc() as u64))),
         }
     }
 
@@ -1036,7 +1093,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> AsyncTaskT
 
     /// 判断当前时间是否有可以弹出的任务，如果有可以弹出的任务，则返回当前时间，否则返回空
     pub fn is_require_pop(&self) -> Option<u64> {
-        let current_time = minstant::Instant::now().elapsed().as_millis() as u64;
+        let current_time = (minstant::now() as f64 * minstant::nanos_per_cycle() / 1000000.0).trunc() as u64;
         if self.timer.borrow().check_sleep(current_time) == 0 {
             Some(current_time)
         } else {
@@ -1288,27 +1345,50 @@ impl<
 
                     //执行任务，并检查是否由当前任务唤醒等待的任务
                     let r = future.await;
-                    if let Ok(false) = is_finish_copy.compare_exchange_weak(false,
-                                                                            true,
-                                                                            Ordering::SeqCst,
-                                                                            Ordering::SeqCst) {
-                        //当前任务执行完成，则立即唤醒等待的任务
-                        *result_copy.0.borrow_mut() = Some(r);
-                        wait_copy.wakeup(&task_id_copy);
+                    if cfg!(target_arch = "aarch64") {
+                        if let Ok(false) = is_finish_copy.compare_exchange(false,
+                                                                           true,
+                                                                           Ordering::SeqCst,
+                                                                           Ordering::SeqCst) {
+                            //当前任务执行完成，则立即唤醒等待的任务
+                            *result_copy.0.borrow_mut() = Some(r);
+                            wait_copy.wakeup(&task_id_copy);
+                        }
+                    } else {
+                        if let Ok(false) = is_finish_copy.compare_exchange_weak(false,
+                                                                                true,
+                                                                                Ordering::SeqCst,
+                                                                                Ordering::SeqCst) {
+                            //当前任务执行完成，则立即唤醒等待的任务
+                            *result_copy.0.borrow_mut() = Some(r);
+                            wait_copy.wakeup(&task_id_copy);
+                        }
                     }
 
                     //返回异步任务的默认值
                     Default::default()
                 }) {
                     //派发指定的任务失败，则退出派发循环
-                    if let Ok(false) = is_finish.compare_exchange_weak(false,
-                                                                       true,
-                                                                       Ordering::SeqCst,
-                                                                       Ordering::SeqCst) {
-                        //立即唤醒等待的任务
-                        *result.0.borrow_mut() = Some(Err(Error::new(ErrorKind::Other, format!("Async Task Runner Error, reason: {:?}", e))));
-                        wait.wakeup(&task_id_);
+                    if cfg!(target_arch = "aarch64") {
+                        if let Ok(false) = is_finish.compare_exchange(false,
+                                                                      true,
+                                                                      Ordering::SeqCst,
+                                                                      Ordering::SeqCst) {
+                            //立即唤醒等待的任务
+                            *result.0.borrow_mut() = Some(Err(Error::new(ErrorKind::Other, format!("Async Task Runner Error, reason: {:?}", e))));
+                            wait.wakeup(&task_id_);
+                        }
+                    } else {
+                        if let Ok(false) = is_finish.compare_exchange_weak(false,
+                                                                           true,
+                                                                           Ordering::SeqCst,
+                                                                           Ordering::SeqCst) {
+                            //立即唤醒等待的任务
+                            *result.0.borrow_mut() = Some(Err(Error::new(ErrorKind::Other, format!("Async Task Runner Error, reason: {:?}", e))));
+                            wait.wakeup(&task_id_);
+                        }
                     }
+
                     break;
                 }
             }
@@ -1430,6 +1510,35 @@ impl<
                         //有检查器
                         if check(&r) {
                             //检查通过，则立即唤醒等待的任务，否则等待其它任务唤醒
+                            if cfg!(target_arch = "aarch64") {
+                                if let Ok(false) = is_finish_copy.compare_exchange(false,
+                                                                                   true,
+                                                                                   Ordering::SeqCst,
+                                                                                   Ordering::SeqCst) {
+                                    *result_copy.0.borrow_mut() = Some(r);
+                                    wait_copy.wakeup(&task_id_copy);
+                                }
+                            } else {
+                                if let Ok(false) = is_finish_copy.compare_exchange_weak(false,
+                                                                                        true,
+                                                                                        Ordering::SeqCst,
+                                                                                        Ordering::SeqCst) {
+                                    *result_copy.0.borrow_mut() = Some(r);
+                                    wait_copy.wakeup(&task_id_copy);
+                                }
+                            }
+                        }
+                    } else {
+                        //无检查器，则立即唤醒等待的任务
+                        if cfg!(target_arch = "aarch64") {
+                            if let Ok(false) = is_finish_copy.compare_exchange(false,
+                                                                               true,
+                                                                               Ordering::SeqCst,
+                                                                               Ordering::SeqCst) {
+                                *result_copy.0.borrow_mut() = Some(r);
+                                wait_copy.wakeup(&task_id_copy);
+                            }
+                        } else {
                             if let Ok(false) = is_finish_copy.compare_exchange_weak(false,
                                                                                     true,
                                                                                     Ordering::SeqCst,
@@ -1438,29 +1547,32 @@ impl<
                                 wait_copy.wakeup(&task_id_copy);
                             }
                         }
-                    } else {
-                        //无检查器，则立即唤醒等待的任务
-                        if let Ok(false) = is_finish_copy.compare_exchange_weak(false,
-                                                                                true,
-                                                                                Ordering::SeqCst,
-                                                                                Ordering::SeqCst) {
-                            *result_copy.0.borrow_mut() = Some(r);
-                            wait_copy.wakeup(&task_id_copy);
-                        }
                     }
 
                     //返回异步任务的默认值
                     Default::default()
                 }) {
                     //派发指定的任务失败，则退出派发循环
-                    if let Ok(false) = is_finish.compare_exchange_weak(false,
-                                                                       true,
-                                                                       Ordering::SeqCst,
-                                                                       Ordering::SeqCst) {
-                        //立即唤醒等待的任务
-                        *result.0.borrow_mut() = Some(Err(Error::new(ErrorKind::Other, format!("Async Task Runner Error, reason: {:?}", e))));
-                        wait.wakeup(&task_id_);
+                    if cfg!(target_arch = "aarch64") {
+                        if let Ok(false) = is_finish.compare_exchange(false,
+                                                                      true,
+                                                                      Ordering::SeqCst,
+                                                                      Ordering::SeqCst) {
+                            //立即唤醒等待的任务
+                            *result.0.borrow_mut() = Some(Err(Error::new(ErrorKind::Other, format!("Async Task Runner Error, reason: {:?}", e))));
+                            wait.wakeup(&task_id_);
+                        }
+                    } else {
+                        if let Ok(false) = is_finish.compare_exchange_weak(false,
+                                                                           true,
+                                                                           Ordering::SeqCst,
+                                                                           Ordering::SeqCst) {
+                            //立即唤醒等待的任务
+                            *result.0.borrow_mut() = Some(Err(Error::new(ErrorKind::Other, format!("Async Task Runner Error, reason: {:?}", e))));
+                            wait.wakeup(&task_id_);
+                        }
                     }
+
                     break;
                 }
             }
