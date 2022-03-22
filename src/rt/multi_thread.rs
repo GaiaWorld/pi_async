@@ -1339,7 +1339,9 @@ fn timer_work_loop<
                     is_sleep.store(true, Ordering::SeqCst);
 
                     //获取休眠的实际时长
-                    let diff_time = (minstant::Instant::now() - timer_run_millis).as_millis() as u64; //获取定时器运行时长
+                    let diff_time =  minstant::Instant::now()
+                        .duration_since(timer_run_millis)
+                        .as_millis() as u64; //获取定时器运行时长
                     let real_timeout = if timer.lock().len() == 0 {
                         //当前定时器没有未到期的任务，则休眠指定时长
                         sleep_timeout
