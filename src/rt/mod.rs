@@ -8,6 +8,7 @@ use std::future::Future;
 use std::mem::transmute;
 use std::sync::{Arc, Weak};
 use std::any::{Any, TypeId};
+use std::marker::PhantomData;
 use std::time::{Instant, Duration};
 use std::cell::{RefCell, UnsafeCell};
 use std::panic::{PanicInfo, set_hook};
@@ -32,8 +33,8 @@ use num_cpus;
 use pi_hash::XHashMap;
 use pi_local_timer::local_timer::LocalTimer;
 
-use single_thread::SingleTaskRuntime;
-use multi_thread::MultiTaskRuntime;
+use single_thread::{SingleTaskPool, SingleTaskRunner, SingleTaskRuntime};
+use multi_thread::{StealableTaskPool, MultiTaskRuntimeBuilder, MultiTaskRuntime};
 
 use crate::lock::spin;
 
@@ -396,6 +397,163 @@ pub trait AsyncRuntimeExt<O: Default + 'static> {
 }
 
 ///
+/// 异步运行时构建器
+///
+pub struct AsyncRuntimeBuilder<O: Default + 'static>(PhantomData<O>);
+
+impl<O: Default + 'static> AsyncRuntimeBuilder<O> {
+    /// 构建默认的单线程异步运行时
+    pub fn default_single_thread(worker_name: Option<&str>,
+                                 worker_stack_size: Option<usize>,
+                                 worker_sleep_timeout: Option<u64>,
+                                 worker_loop_interval: Option<Option<u64>>) -> AsyncRuntime<O, SingleTaskPool<O>> {
+        let thread_handler = Arc::new(AtomicBool::new(true));
+        let thread_waker = Arc::new((AtomicBool::new(false), Mutex::new(()), Condvar::new()));
+
+        //构建异步运行时
+        let runner = SingleTaskRunner::default();
+        let rt = AsyncRuntime::Worker(thread_handler.clone(),
+                                      thread_waker.clone(),
+                                      runner.startup().unwrap());
+
+        let thread_name = if let Some(name) = worker_name {
+            name
+        } else {
+            //默认的线程名称
+            "Default-Single-Worker"
+        };
+        let thread_stack_size = if let Some(size) = worker_stack_size {
+            size
+        } else {
+            //默认的线程堆栈大小
+            2 * 1024 * 1024
+        };
+        let sleep_timeout = if let Some(timeout) = worker_sleep_timeout {
+            timeout
+        } else {
+            //默认的线程休眠时长
+            1
+        };
+        let loop_interval = if let Some(interval) = worker_loop_interval {
+            interval
+        } else {
+            //默认的线程循环间隔时长
+            None
+        };
+
+        //创建线程并在线程中执行异步运行时
+        let rt_copy = rt.clone();
+        let _worker_handle = spawn_worker_thread(
+            thread_name,
+            thread_stack_size,
+            thread_handler,
+            thread_waker,
+            sleep_timeout,
+            loop_interval,
+            move || {
+                let now = minstant::Instant::now();
+                match runner.run_once() {
+                    Err(e) => {
+                        panic!("Run runner failed, reason: {:?}", e);
+                    },
+                    Ok(len) => {
+                        (len == 0, minstant::Instant::now().duration_since(now))
+                    },
+                }
+            },
+            move || {
+                rt_copy.wait_len() + rt_copy.len()
+            },
+        );
+
+        rt
+    }
+
+    /// 构建自定义的单线程异步运行时
+    pub fn custom_single_thread<P, F0, F1>(pool: P,
+                                           worker_handle: Arc<AtomicBool>,
+                                           worker_condvar: Arc<(AtomicBool, Mutex<()>, Condvar)>,
+                                           thread_name: &str,
+                                           thread_stack_size: usize,
+                                           sleep_timeout: u64,
+                                           loop_interval: Option<u64>,
+                                           loop_func: F0,
+                                           get_queue_len: F1) -> AsyncRuntime<O, P>
+        where P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+              F0: Fn() -> (bool, Duration) + Send + 'static,
+              F1: Fn() -> usize + Send + 'static {
+        //构建异步运行时
+        let runner = SingleTaskRunner::new(pool);
+        let rt = AsyncRuntime::Worker(worker_handle.clone(),
+                                      worker_condvar.clone(),
+                                      runner.startup().unwrap());
+
+        //创建线程并在线程中执行异步运行时
+        let rt_copy = rt.clone();
+        let _worker_handle = spawn_worker_thread(
+            thread_name,
+            thread_stack_size,
+            worker_handle,
+            worker_condvar,
+            sleep_timeout,
+            loop_interval,
+            loop_func,
+            move || {
+                rt_copy.wait_len() + get_queue_len()
+            },
+        );
+
+        rt
+    }
+
+    /// 构建默认的多线程异步运行时
+    pub fn default_multi_thread(worker_prefix: Option<&str>,
+                                worker_stack_size: Option<usize>,
+                                worker_size: Option<usize>,
+                                worker_sleep_timeout: Option<u64>) -> AsyncRuntime<O, StealableTaskPool<O>> {
+        let mut builder = MultiTaskRuntimeBuilder::default();
+
+        if let Some(thread_prefix) = worker_prefix {
+            builder = builder.thread_prefix(thread_prefix);
+        }
+        if let Some(thread_stack_size) = worker_stack_size {
+            builder = builder.thread_stack_size(thread_stack_size);
+        }
+        if let Some(size) = worker_size {
+            builder = builder
+                .init_worker_size(size)
+                .set_worker_limit(size, size);
+        }
+        if let Some(sleep_timeout) = worker_sleep_timeout {
+            builder = builder.set_timeout(sleep_timeout);
+        }
+
+        let rt = builder.build();
+        AsyncRuntime::Multi(rt)
+    }
+
+    /// 构建自定义的多线程异步运行时
+    pub fn custom_multi_thread<P>(pool: P,
+                                  worker_prefix: &str,
+                                  worker_stack_size: usize,
+                                  worker_size: usize,
+                                  worker_sleep_timeout: u64,
+                                  worker_timer_interval: usize) -> AsyncRuntime<O, P>
+        where P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P> {
+        let rt = MultiTaskRuntimeBuilder::new(pool)
+            .thread_prefix(worker_prefix)
+            .thread_stack_size(worker_stack_size)
+            .init_worker_size(worker_size)
+            .set_worker_limit(worker_size, worker_size)
+            .set_timeout(worker_sleep_timeout)
+            .set_timer_interval(worker_timer_interval)
+            .build();
+
+        AsyncRuntime::Multi(rt)
+    }
+}
+
+///
 /// 异步运行时
 ///
 pub enum AsyncRuntime<
@@ -500,7 +658,7 @@ impl<
     /// 获取当前异步运行时待处理任务数量
     pub fn wait_len(&self) -> usize {
         match self {
-            AsyncRuntime::Local(rt) => rt.len(),
+            AsyncRuntime::Local(rt) => rt.timing_len(),
             AsyncRuntime::Multi(rt) => rt.len(),
             AsyncRuntime::Worker(_, _, rt) => rt.len(),
         }
