@@ -5,7 +5,7 @@ extern crate crossbeam_channel;
 extern crate twox_hash;
 extern crate dashmap;
 extern crate tokio;
-extern crate r#async;
+extern crate pi_async;
 
 #[allow(unused_imports)]
 #[macro_use]
@@ -34,16 +34,16 @@ use future_parking_lot::{mutex::{Mutex as FutureMutex, FutureLockable}, rwlock::
 use tokio::runtime::Builder as TokioRtBuilder;
 use async_stream::stream;
 
-use r#async::{AsyncExecutorResult, AsyncExecutor, AsyncSpawner,
-                  lock::{mpmc_deque::MpmcDeque,
-                         mpsc_deque::mpsc_deque,
-                         spin_lock::SpinLock,
-                         mutex_lock::Mutex,
-                         rw_lock::RwLock},
-                  rt::{TaskId, AsyncTask, AsyncRuntime, AsyncValue, spawn_worker_thread, AsyncPipelineResult, register_global_panic_handler,
-                       single_thread::{SingleTaskRuntime, SingleTaskRunner},
-                       multi_thread::{MultiTaskRuntime, MultiTaskRuntimeBuilder}},
-                  local_queue::{LocalQueueSpawner, LocalQueue}, task::LocalTask};
+use pi_async::{AsyncExecutorResult, AsyncExecutor, AsyncSpawner,
+               lock::{mpmc_deque::MpmcDeque,
+                      mpsc_deque::mpsc_deque,
+                      spin_lock::SpinLock,
+                      mutex_lock::Mutex,
+                      rw_lock::RwLock},
+               rt::{TaskId, AsyncTask, AsyncRuntimeBuilder, AsyncRuntime, AsyncValue, spawn_worker_thread, AsyncPipelineResult, register_global_panic_handler,
+                    single_thread::{SingleTaskRuntime, SingleTaskRunner},
+                    multi_thread::{MultiTaskRuntime, MultiTaskRuntimeBuilder}},
+               local_queue::{LocalQueueSpawner, LocalQueue}, task::LocalTask};
 
 #[test]
 fn test_other_rt() {

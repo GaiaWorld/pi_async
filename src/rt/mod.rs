@@ -16,6 +16,7 @@ use std::task::{Waker, Context, Poll};
 use std::io::{Error, Result, ErrorKind};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, AtomicIsize, Ordering};
+use std::sync::atomic::Ordering::Acquire;
 
 use futures::stream::{Stream, BoxStream};
 
@@ -1107,6 +1108,11 @@ impl<
             value: Arc::new(RefCell::new(None)),
             status: Arc::new(AtomicU8::new(0)),
         }
+    }
+
+    /// 判断异步值是否已完成设置
+    pub fn is_complete(&self) -> bool {
+        self.status.load(Ordering::Acquire) == 2
     }
 
     /// 设置异步值
