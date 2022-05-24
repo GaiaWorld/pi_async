@@ -40,7 +40,7 @@ use pi_async::{AsyncExecutorResult, AsyncExecutor, AsyncSpawner,
                       spin_lock::SpinLock,
                       mutex_lock::Mutex,
                       rw_lock::RwLock},
-               rt::{TaskId, AsyncTask, AsyncRuntimeBuilder, AsyncRuntime, AsyncValue, spawn_worker_thread, AsyncPipelineResult, register_global_panic_handler,
+               rt::{TaskId, AsyncTask, AsyncRuntimeBuilder, AsyncRuntime, AsyncValue, AsyncVariable, spawn_worker_thread, AsyncPipelineResult, register_global_panic_handler,
                     single_thread::{SingleTaskRuntime, SingleTaskRunner},
                     multi_thread::{MultiTaskRuntime, MultiTaskRuntimeBuilder}},
                local_queue::{LocalQueueSpawner, LocalQueue}, task::LocalTask};
@@ -3446,7 +3446,7 @@ fn test_async_value() {
                 println!("!!!!!!run failed, reason: {:?}", e);
                 break;
             }
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(1));
         }
     });
 
@@ -3650,6 +3650,351 @@ fn test_async_value() {
                 let value_copy = value.clone();
                 rt0_clone.spawn(rt0_clone.alloc(), async move {
                     value_copy.set(true);
+                });
+                value.await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt1_copy.spawn(rt1_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+    thread::sleep(Duration::from_millis(100000000));
+}
+
+//一个AsyncVariable任务由2个异步任务组成，不包括创建AsyncVariable的异步任务
+#[test]
+fn test_async_variable() {
+    use std::mem;
+
+    let runner = SingleTaskRunner::default();
+    let rt0 = runner.startup().unwrap();
+
+    thread::spawn(move || {
+        loop {
+            if let Err(e) = runner.run() {
+                println!("!!!!!!run failed, reason: {:?}", e);
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+
+    let pool = MultiTaskRuntimeBuilder::default()
+        .init_worker_size(4)
+        .set_worker_limit(4, 4);
+    let rt1 = pool.build();
+
+    {
+        let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+        let start = Instant::now();
+        for _ in 0..10000000 {
+            let rt0_copy = rt0.clone();
+            let counter_copy = counter.clone();
+            let future = async move {
+                let value = AsyncVariable::new(AsyncRuntime::Local(rt0_copy.clone()));
+                let value_copy = value.clone();
+                rt0_copy.spawn(rt0_copy.alloc(), async move {
+                    {
+                        let mut locked = value_copy.lock().unwrap();
+                        *locked = Some(true);
+                    }
+                    value_copy.finish();
+                });
+                value.await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt0.spawn(rt0.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    }
+    thread::sleep(Duration::from_millis(30000));
+
+    let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+    let counter0 = counter.clone();
+    let counter1 = counter.clone();
+    let counter2 = counter.clone();
+    let counter3 = counter.clone();
+    mem::drop(counter);
+
+    let rt1_copy = rt1.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt1_clone = rt1_copy.clone();
+            let counter_copy = counter0.clone();
+            let future = async move {
+                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                value.await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt1_copy.spawn(rt1_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+
+    let rt1_copy = rt1.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt1_clone = rt1_copy.clone();
+            let counter_copy = counter1.clone();
+            let future = async move {
+                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                value.await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt1_copy.spawn(rt1_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+
+    let rt1_copy = rt1.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt1_clone = rt1_copy.clone();
+            let counter_copy = counter2.clone();
+            let future = async move {
+                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                value.await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt1_copy.spawn(rt1_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+
+    let rt1_copy = rt1.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt1_clone = rt1_copy.clone();
+            let counter_copy = counter3.clone();
+            let future = async move {
+                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                value.await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt1_copy.spawn(rt1_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+    thread::sleep(Duration::from_millis(50000));
+
+    let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+    let counter0 = counter.clone();
+    let counter1 = counter.clone();
+    let counter2 = counter.clone();
+    let counter3 = counter.clone();
+    mem::drop(counter);
+
+    let rt0_copy = rt0.clone();
+    let rt1_copy = rt1.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt0_clone = rt0_copy.clone();
+            let rt1_clone = rt1_copy.clone();
+            let counter_copy = counter0.clone();
+            let future = async move {
+                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value_copy = value.clone();
+                rt0_clone.spawn(rt0_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                value.await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt1_copy.spawn(rt1_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+
+    let rt0_copy = rt0.clone();
+    let rt1_copy = rt1.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt0_clone = rt0_copy.clone();
+            let rt1_clone = rt1_copy.clone();
+            let counter_copy = counter1.clone();
+            let future = async move {
+                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value_copy = value.clone();
+                rt0_clone.spawn(rt0_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                value.await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt1_copy.spawn(rt1_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+
+    let rt0_copy = rt0.clone();
+    let rt1_copy = rt1.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt0_clone = rt0_copy.clone();
+            let rt1_clone = rt1_copy.clone();
+            let counter_copy = counter2.clone();
+            let future = async move {
+                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value_copy = value.clone();
+                rt0_clone.spawn(rt0_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                value.await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt1_copy.spawn(rt1_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+
+    let rt0_copy = rt0.clone();
+    let rt1_copy = rt1.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt0_clone = rt0_copy.clone();
+            let rt1_clone = rt1_copy.clone();
+            let counter_copy = counter3.clone();
+            let future = async move {
+                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value_copy = value.clone();
+                rt0_clone.spawn(rt0_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
+                });
+                let value_copy = value.clone();
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
+                    {
+                        if let Some(mut locked) = value_copy.lock() {
+                            *locked = Some(true);
+                        }
+                    }
+                    value_copy.finish();
                 });
                 value.await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
