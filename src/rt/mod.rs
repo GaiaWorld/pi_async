@@ -1039,12 +1039,7 @@ pub struct AsyncValue<
     O: Default + 'static,
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
     V: Send + 'static,
-> {
-    rt:         AsyncRuntime<O, P>,         //异步值的运行时
-    task_id:    TaskId,                     //异步值的任务唯一id
-    value:      Arc<RefCell<Option<V>>>,    //值
-    status:     Arc<AtomicU8>,              //值状态
-}
+>(Arc<InnerAsyncValue<O, P, V>>);
 
 unsafe impl<
     O: Default + 'static,
@@ -1063,12 +1058,7 @@ impl<
     V: Send + 'static,
 > Clone for AsyncValue<O, P, V> {
     fn clone(&self) -> Self {
-        AsyncValue {
-            rt: self.rt.clone(),
-            task_id: self.task_id.clone(),
-            value: self.value.clone(),
-            status: self.status.clone(),
-        }
+        AsyncValue(self.0.clone())
     }
 }
 
@@ -1080,13 +1070,13 @@ impl<
     type Output = V;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(value) = (&self).value.borrow_mut().take() {
+        if let Some(value) = (&self).0.value.borrow_mut().take() {
             //异步值已就绪
             return Poll::Ready(value);
         }
 
-        let r = self.rt.pending(&self.task_id, cx.waker().clone());
-        (&self).status.store(1, Ordering::Relaxed); //将异步值状态设置为就绪
+        let r = self.0.rt.pending(&self.0.task_id, cx.waker().clone());
+        (&self).0.status.store(1, Ordering::Relaxed); //将异步值状态设置为就绪
         r
     }
 }
@@ -1102,28 +1092,35 @@ impl<
     /// 构建异步值，默认值为未就绪
     pub fn new(rt: AsyncRuntime<O, P>) -> Self {
         let task_id = rt.alloc();
-
-        AsyncValue {
+        let inner = InnerAsyncValue {
             rt,
             task_id,
-            value: Arc::new(RefCell::new(None)),
-            status: Arc::new(AtomicU8::new(0)),
-        }
+            value: RefCell::new(None),
+            status: AtomicU8::new(0),
+        };
+
+        AsyncValue(Arc::new(inner))
     }
 
     /// 判断异步值是否已完成设置
     pub fn is_complete(&self) -> bool {
-        self.status.load(Ordering::Acquire) == 2
+        self
+            .0
+            .status
+            .load(Ordering::Acquire) == 2
     }
 
     /// 设置异步值
     pub fn set(self, value: V) {
         let mut spin_len = 1;
         loop {
-            match self.status.compare_exchange(1,
-                                               2,
-                                               Ordering::Acquire,
-                                               Ordering::Relaxed) {
+            match self
+                .0
+                .status
+                .compare_exchange(1,
+                                  2,
+                                  Ordering::Acquire,
+                                  Ordering::Relaxed) {
                 Err(0) => {
                     //还未就绪，则自旋等待
                     spin_len = spin(spin_len);
@@ -1141,32 +1138,44 @@ impl<
 
         //设置后立即释放可写引用，防止唤醒时出现冲突
         {
-            *self.value.borrow_mut() = Some(value);
+            *self.0.value.borrow_mut() = Some(value);
         }
 
         //唤醒异步值
-        self.rt.wakeup(&self.task_id);
+        self.0.rt.wakeup(&self.0.task_id);
     }
+}
+
+// 内部异步值，只允许被设置一次值
+pub struct InnerAsyncValue<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
+    V: Send + 'static,
+> {
+    rt:         AsyncRuntime<O, P>, //异步值的运行时
+    task_id:    TaskId,             //异步值的任务唯一id
+    value:      RefCell<Option<V>>, //值
+    status:     AtomicU8,           //值状态
 }
 
 ///
 /// 异步可变值的守护者
 ///
-pub struct AsyncVariableGuard<V: Send + 'static> {
-    value:  Arc<UnsafeCell<Option<V>>>, //可变值
-    status: Arc<AtomicU8>,              //值状态
+pub struct AsyncVariableGuard<'a, V: Send + 'static> {
+    value:  &'a UnsafeCell<Option<V>>,  //可变值
+    status: &'a AtomicU8,               //值状态
 }
 
-unsafe impl<V: Send + 'static> Send for AsyncVariableGuard<V> {}
+unsafe impl<V: Send + 'static> Send for AsyncVariableGuard<'_, V> {}
 
-impl<V: Send + 'static> Drop for AsyncVariableGuard<V> {
+impl<V: Send + 'static> Drop for AsyncVariableGuard<'_, V> {
     fn drop(&mut self) {
         //将异步可变值的状态改为已就绪
         self.status.store(1, Ordering::Relaxed);
     }
 }
 
-impl<V: Send + 'static> Deref for AsyncVariableGuard<V> {
+impl<V: Send + 'static> Deref for AsyncVariableGuard<'_, V> {
     type Target = Option<V>;
 
     fn deref(&self) -> &Self::Target {
@@ -1176,7 +1185,7 @@ impl<V: Send + 'static> Deref for AsyncVariableGuard<V> {
     }
 }
 
-impl<V: Send + 'static> DerefMut for AsyncVariableGuard<V> {
+impl<V: Send + 'static> DerefMut for AsyncVariableGuard<'_, V> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
             &mut *self.value.get()
@@ -1191,12 +1200,7 @@ pub struct AsyncVariable<
     O: Default + 'static,
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
     V: Send + 'static,
-> {
-    rt:         AsyncRuntime<O, P>,         //异步值的运行时
-    task_id:    TaskId,                     //异步值的任务唯一id
-    value:      Arc<UnsafeCell<Option<V>>>, //值
-    status:     Arc<AtomicU8>,              //值状态
-}
+>(Arc<InnerAsyncVariable<O, P, V>>);
 
 unsafe impl<
     O: Default + 'static,
@@ -1215,12 +1219,7 @@ impl<
     V: Send + 'static,
 > Clone for AsyncVariable<O, P, V> {
     fn clone(&self) -> Self {
-        AsyncVariable {
-            rt: self.rt.clone(),
-            task_id: self.task_id.clone(),
-            value: self.value.clone(),
-            status: self.status.clone(),
-        }
+        AsyncVariable(self.0.clone())
     }
 }
 
@@ -1232,13 +1231,13 @@ impl<
     type Output = V;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(value) = unsafe { (&mut *(&self).value.get()).take() } {
+        if let Some(value) = unsafe { (&mut *(&self).0.value.get()).take() } {
             //异步可变值已就绪
             return Poll::Ready(value);
         }
 
-        let r = self.rt.pending(&self.task_id, cx.waker().clone());
-        (&self).status.store(1, Ordering::Relaxed); //将异步可变值状态设置为就绪
+        let r = self.0.rt.pending(&self.0.task_id, cx.waker().clone());
+        (&self).0.status.store(1, Ordering::Relaxed); //将异步可变值状态设置为就绪
         r
     }
 }
@@ -1251,28 +1250,35 @@ impl<
     /// 构建异步可变值，默认值为未就绪
     pub fn new(rt: AsyncRuntime<O, P>) -> Self {
         let task_id = rt.alloc();
-
-        AsyncVariable {
+        let inner = InnerAsyncVariable {
             rt,
             task_id,
-            value: Arc::new(UnsafeCell::new(None)),
-            status: Arc::new(AtomicU8::new(0)),
-        }
+            value: UnsafeCell::new(None),
+            status: AtomicU8::new(0),
+        };
+
+        AsyncVariable(Arc::new(inner))
     }
 
     /// 判断异步值是否已完成设置
     pub fn is_complete(&self) -> bool {
-        self.status.load(Ordering::Acquire) == 3
+        self
+            .0
+            .status
+            .load(Ordering::Acquire) == 3
     }
 
     /// 锁住待修改的异步可变值，并返回当前异步可变值的守护者，如果异步可变值已完成修改则返回空
     pub fn lock(&self) -> Option<AsyncVariableGuard<V>> {
         let mut spin_len = 1;
         loop {
-            match self.status.compare_exchange(1,
-                                               2,
-                                               Ordering::Acquire,
-                                               Ordering::Relaxed) {
+            match self
+                .0
+                .status
+                .compare_exchange(1,
+                                  2,
+                                  Ordering::Acquire,
+                                  Ordering::Relaxed) {
                 Err(0) => {
                     //还未就绪，则自旋等待
                     spin_len = spin(spin_len);
@@ -1288,8 +1294,8 @@ impl<
                 Ok(_) => {
                     //已锁且获取到锁，则返回异步可变值的守护者
                     let guard = AsyncVariableGuard {
-                        value: self.value.clone(),
-                        status: self.status.clone(),
+                        value: &self.0.value,
+                        status: &self.0.status,
                     };
 
                     return Some(guard)
@@ -1302,10 +1308,13 @@ impl<
     pub fn finish(&self) {
         let mut spin_len = 1;
         loop {
-            match self.status.compare_exchange(1,
-                                               3,
-                                               Ordering::Acquire,
-                                               Ordering::Relaxed) {
+            match self
+                .0
+                .status
+                .compare_exchange(1,
+                                  3,
+                                  Ordering::Acquire,
+                                  Ordering::Relaxed) {
                 Err(0) => {
                     //还未就绪，则自旋等待
                     spin_len = spin(spin_len);
@@ -1326,8 +1335,20 @@ impl<
         }
 
         //唤醒异步可变值
-        self.rt.wakeup(&self.task_id);
+        self.0.rt.wakeup(&self.0.task_id);
     }
+}
+
+// 内部异步可变值，在完成前允许被修改多次
+pub struct InnerAsyncVariable<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
+    V: Send + 'static,
+> {
+    rt:         AsyncRuntime<O, P>,     //异步值的运行时
+    task_id:    TaskId,                 //异步值的任务唯一id
+    value:      UnsafeCell<Option<V>>,  //值
+    status:     AtomicU8,               //值状态
 }
 
 ///
