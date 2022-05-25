@@ -3592,8 +3592,8 @@ fn test_async_value() {
     });
 
     let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(8)
-        .set_worker_limit(8, 8);
+        .init_worker_size(4)
+        .set_worker_limit(4, 4);
     let rt1 = pool.build();
 
     {
