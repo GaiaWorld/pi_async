@@ -33,6 +33,7 @@ use rand::prelude::*;
 use future_parking_lot::{mutex::{Mutex as FutureMutex, FutureLockable}, rwlock::{RwLock as FutureRwLock, FutureReadable, FutureWriteable}};
 use tokio::runtime::Builder as TokioRtBuilder;
 use async_stream::stream;
+use flume::{Sender as AsyncSender, Receiver as AsyncReceiver, bounded as async_bounded};
 
 use pi_async::{AsyncExecutorResult, AsyncExecutor, AsyncSpawner,
                lock::{mpmc_deque::MpmcDeque,
@@ -3432,6 +3433,146 @@ fn test_multi_timing_task() {
     thread::sleep(Duration::from_millis(100000000));
 }
 
+#[test]
+fn test_flume() {
+    use std::mem;
+
+    let runner = SingleTaskRunner::default();
+    let rt0 = runner.startup().unwrap();
+
+    thread::spawn(move || {
+        loop {
+            if let Err(e) = runner.run() {
+                println!("!!!!!!run failed, reason: {:?}", e);
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+
+    let rt = AsyncRuntime::Multi(MultiTaskRuntimeBuilder::default()
+        .init_worker_size(4)
+        .set_worker_limit(4, 4)
+        .build()
+    );
+
+    {
+        let (sender, receiver) = async_bounded(100000000);
+        let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+        let start = Instant::now();
+        for _ in 0..10000000 {
+            let rt0_copy = rt0.clone();
+            let counter_copy = counter.clone();
+            let sender_copy = sender.clone();
+            let receiver_copy = receiver.clone();
+            let future = async move {
+                rt0_copy.spawn(rt0_copy.alloc(), async move {
+                    sender_copy.send_async(true).await;
+                });
+                receiver_copy.recv_async().await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt0.spawn(rt0.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    }
+    thread::sleep(Duration::from_millis(30000));
+
+    let (sender0, receiver0) = async_bounded(10000000);
+    let (sender1, receiver1) = async_bounded(10000000);
+    let (sender2, receiver2) = async_bounded(10000000);
+    let (sender3, receiver3) = async_bounded(10000000);
+
+    let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+    let counter0 = counter.clone();
+    let counter1 = counter.clone();
+    let counter2 = counter.clone();
+    let counter3 = counter.clone();
+    mem::drop(counter);
+
+    let rt_copy = rt.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt0_copy = rt_copy.clone();
+            let counter_copy = counter0.clone();
+            let sender0_copy = sender0.clone();
+            let receiver0_copy = receiver0.clone();
+            let future = async move {
+                rt0_copy.spawn(rt0_copy.alloc(), async move {
+                    sender0_copy.send_async(true).await;
+                });
+                receiver0_copy.recv_async().await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt_copy.spawn(rt_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+
+    let rt_copy = rt.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt1_copy = rt_copy.clone();
+            let counter_copy = counter1.clone();
+            let sender1_copy = sender1.clone();
+            let receiver1_copy = receiver1.clone();
+            let future = async move {
+                rt1_copy.spawn(rt1_copy.alloc(), async move {
+                    sender1_copy.send_async(true).await;
+                });
+                receiver1_copy.recv_async().await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt_copy.spawn(rt_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+
+    let rt_copy = rt.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt2_copy = rt_copy.clone();
+            let counter_copy = counter2.clone();
+            let sender2_copy = sender2.clone();
+            let receiver2_copy = receiver2.clone();
+            let future = async move {
+                rt2_copy.spawn(rt2_copy.alloc(), async move {
+                    sender2_copy.send_async(true).await;
+                });
+                receiver2_copy.recv_async().await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt_copy.spawn(rt_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+
+    let rt_copy = rt.clone();
+    thread::spawn(move || {
+        let start = Instant::now();
+        for _ in 0..2500000 {
+            let rt3_copy = rt_copy.clone();
+            let counter_copy = counter3.clone();
+            let sender3_copy = sender3.clone();
+            let receiver3_copy = receiver3.clone();
+            let future = async move {
+                rt3_copy.spawn(rt3_copy.alloc(), async move {
+                    sender3_copy.send_async(true).await;
+                });
+                receiver3_copy.recv_async().await;
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            };
+            rt_copy.spawn(rt_copy.alloc(), future);
+        }
+        println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
+    });
+
+    thread::sleep(Duration::from_millis(1000000000));
+}
+
 //一个AsyncValue任务由2个异步任务组成，不包括创建AsyncValue的异步任务
 #[test]
 fn test_async_value() {
@@ -3451,8 +3592,8 @@ fn test_async_value() {
     });
 
     let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(4)
-        .set_worker_limit(4, 4);
+        .init_worker_size(8)
+        .set_worker_limit(8, 8);
     let rt1 = pool.build();
 
     {
