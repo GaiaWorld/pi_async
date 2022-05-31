@@ -45,6 +45,7 @@ use pi_async::{AsyncExecutorResult, AsyncExecutor, AsyncSpawner,
                     single_thread::{SingleTaskRuntime, SingleTaskRunner},
                     multi_thread::{MultiTaskRuntime, MultiTaskRuntimeBuilder}},
                local_queue::{LocalQueueSpawner, LocalQueue}, task::LocalTask};
+use pi_async::rt::worker_thread::WorkerTaskRunner;
 
 #[test]
 fn test_other_rt() {
@@ -374,7 +375,7 @@ fn test_async_stream() {
         pin_mut!(s);
 
         while let Some(value) = s.next().await {
-            rt_copy.wait_timeout(1000).await;
+            rt_copy.timeout(1000).await;
             println!("got {}", value);
         }
 
@@ -391,7 +392,7 @@ fn test_async_stream() {
         });
 
         while let Some(value) = s.next().await {
-            rt_copy.wait_timeout(1000).await;
+            rt_copy.timeout(1000).await;
             println!("got {:?}", value);
         }
 
@@ -1306,7 +1307,7 @@ fn test_future_mutex() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Local(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -1327,7 +1328,7 @@ fn test_future_mutex() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -1347,7 +1348,7 @@ fn test_future_mutex() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -1472,7 +1473,7 @@ fn test_futures_mutex() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Local(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -1493,7 +1494,7 @@ fn test_futures_mutex() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -1513,7 +1514,7 @@ fn test_futures_mutex() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -1538,7 +1539,7 @@ fn test_futures_mutex() {
                 let mut v = shared_.lock().await;
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Local(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -1557,7 +1558,7 @@ fn test_futures_mutex() {
                 let mut v = shared0_.lock().await;
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -1575,7 +1576,7 @@ fn test_futures_mutex() {
                 let mut v = shared1_.lock().await;
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -1711,7 +1712,7 @@ fn test_spin_lock() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 let shared0_copy = shared0.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
@@ -1729,7 +1730,7 @@ fn test_spin_lock() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 let shared1_copy = shared1.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
@@ -1788,7 +1789,7 @@ fn test_spin_lock() {
                 let mut v = shared0.lock();
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -1801,7 +1802,7 @@ fn test_spin_lock() {
                 let mut v = shared1.lock();
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2016,7 +2017,7 @@ fn test_mutex_lock() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2031,7 +2032,7 @@ fn test_mutex_lock() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2052,7 +2053,7 @@ fn test_mutex_lock() {
                 let mut v = shared0.lock().await;
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2065,7 +2066,7 @@ fn test_mutex_lock() {
                 let mut v = shared1.lock().await;
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2089,7 +2090,7 @@ fn test_mutex_lock() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 let shared0_copy = shared0.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
@@ -2107,7 +2108,7 @@ fn test_mutex_lock() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 let shared1_copy = shared1.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
@@ -2166,7 +2167,7 @@ fn test_mutex_lock() {
                 let mut v = shared0.lock().await;
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 let shared0_copy = shared0.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
@@ -2182,7 +2183,7 @@ fn test_mutex_lock() {
                 let mut v = shared1.lock().await;
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 let shared1_copy = shared1.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
@@ -2296,7 +2297,7 @@ fn test_mutex_lock_bench() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Local(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2317,7 +2318,7 @@ fn test_mutex_lock_bench() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2337,7 +2338,7 @@ fn test_mutex_lock_bench() {
                     (*v).0 += 1;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2366,7 +2367,7 @@ fn test_mutex_lock_bench() {
                 let mut v = shared_.lock().await;
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Local(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2385,7 +2386,7 @@ fn test_mutex_lock_bench() {
                 let mut v = shared0_.lock().await;
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2402,7 +2403,7 @@ fn test_mutex_lock_bench() {
             rt1_.spawn(rt1_.alloc(), async move {
                 let mut v = shared1_.lock().await;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2434,9 +2435,13 @@ fn test_mutex_lock_bench() {
                     (*v).0 += 1;
                 }
 
-                rt_copy.wait(AsyncRuntime::Local(rt_copy.clone()), async move {
-                    Ok(true)
-                }).await;
+                let wait = rt_copy.wait();
+                wait.spawn(rt_copy.clone(),
+                           None,
+                           async move {
+                               Ok(true)
+                           });
+                wait.wait_result().await;
             });
         }
     });
@@ -2452,9 +2457,13 @@ fn test_mutex_lock_bench() {
                     (*v).0 += 1;
                 }
 
-                rt_copy.wait(AsyncRuntime::Multi(rt_copy.clone()), async move {
-                    Ok(true)
-                }).await;
+                let wait = rt_copy.wait();
+                wait.spawn(rt_copy.clone(),
+                           None,
+                           async move {
+                               Ok(true)
+                           });
+                wait.wait_result().await;
             });
         }
     });
@@ -2469,9 +2478,13 @@ fn test_mutex_lock_bench() {
                     (*v).0 += 1;
                 }
 
-                rt_copy.wait(AsyncRuntime::Multi(rt_copy.clone()), async move {
-                    Ok(true)
-                }).await;
+                let wait = rt_copy.wait();
+                wait.spawn(rt_copy.clone(),
+                           None,
+                           async move {
+                               Ok(true)
+                           });
+                wait.wait_result().await;
             });
         }
     });
@@ -2495,9 +2508,13 @@ fn test_mutex_lock_bench() {
                 let mut v = shared_.lock().await;
                 (*v).0 += 1;
 
-                rt_copy.wait(AsyncRuntime::Local(rt_copy.clone()), async move {
-                    Ok(true)
-                }).await;
+                let wait = rt_copy.wait();
+                wait.spawn(rt_copy.clone(),
+                           None,
+                           async move {
+                               Ok(true)
+                           });
+                wait.wait_result().await;
             });
         }
     });
@@ -2511,9 +2528,13 @@ fn test_mutex_lock_bench() {
                 let mut v = shared0_.lock().await;
                 (*v).0 += 1;
 
-                rt_copy.wait(AsyncRuntime::Multi(rt_copy.clone()), async move {
-                    Ok(true)
-                }).await;
+                let wait = rt_copy.wait();
+                wait.spawn(rt_copy.clone(),
+                           None,
+                           async move {
+                               Ok(true)
+                           });
+                wait.wait_result().await;
             });
         }
     });
@@ -2526,9 +2547,13 @@ fn test_mutex_lock_bench() {
                 let mut v = shared1_.lock().await;
                 (*v).0 += 1;
 
-                rt_copy.wait(AsyncRuntime::Multi(rt_copy.clone()), async move {
-                    Ok(true)
-                }).await;
+                let wait = rt_copy.wait();
+                wait.spawn(rt_copy.clone(),
+                           None,
+                           async move {
+                               Ok(true)
+                           });
+                wait.wait_result().await;
             });
         }
     });
@@ -2554,11 +2579,14 @@ fn test_mutex_lock_bench() {
                     (*v).0 += 1;
                 }
 
-                rt_copy.wait_any(vec![(AsyncRuntime::Local(rt_copy.clone()), Box::new(async move {
+                let wait_any = rt_copy.wait_any(2);
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed()), (AsyncRuntime::Local(rt_copy.clone()), Box::new(async move {
+                });
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed())]).await;
+                });
+                wait_any.wait_result().await;
             });
         }
     });
@@ -2574,11 +2602,14 @@ fn test_mutex_lock_bench() {
                     (*v).0 += 1;
                 }
 
-                rt_copy.wait_any(vec![(AsyncRuntime::Multi(rt_copy.clone()), Box::new(async move {
+                let wait_any = rt_copy.wait_any(2);
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed()), (AsyncRuntime::Multi(rt_copy.clone()), Box::new(async move {
+                });
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed())]).await;
+                });
+                wait_any.wait_result().await;
             });
         }
     });
@@ -2593,11 +2624,14 @@ fn test_mutex_lock_bench() {
                     (*v).0 += 1;
                 }
 
-                rt_copy.wait_any(vec![(AsyncRuntime::Multi(rt_copy.clone()), Box::new(async move {
+                let wait_any = rt_copy.wait_any(2);
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed()), (AsyncRuntime::Multi(rt_copy.clone()), Box::new(async move {
+                });
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed())]).await;
+                });
+                wait_any.wait_result().await;
             });
         }
     });
@@ -2621,11 +2655,14 @@ fn test_mutex_lock_bench() {
                 let mut v = shared_.lock().await;
                 (*v).0 += 1;
 
-                rt_copy.wait_any(vec![(AsyncRuntime::Local(rt_copy.clone()), Box::new(async move {
+                let wait_any = rt_copy.wait_any(2);
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed()), (AsyncRuntime::Local(rt_copy.clone()), Box::new(async move {
+                });
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed())]).await;
+                });
+                wait_any.wait_result().await;
             });
         }
     });
@@ -2639,11 +2676,14 @@ fn test_mutex_lock_bench() {
                 let mut v = shared0_.lock().await;
                 (*v).0 += 1;
 
-                rt_copy.wait_any(vec![(AsyncRuntime::Multi(rt_copy.clone()), Box::new(async move {
+                let wait_any = rt_copy.wait_any(2);
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed()), (AsyncRuntime::Multi(rt_copy.clone()), Box::new(async move {
+                });
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed())]).await;
+                });
+                wait_any.wait_result().await;
             });
         }
     });
@@ -2656,11 +2696,14 @@ fn test_mutex_lock_bench() {
                 let mut v = shared1_.lock().await;
                 (*v).0 += 1;
 
-                rt_copy.wait_any(vec![(AsyncRuntime::Multi(rt_copy.clone()), Box::new(async move {
+                let wait_any = rt_copy.wait_any(2);
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed()), (AsyncRuntime::Multi(rt_copy.clone()), Box::new(async move {
+                });
+                wait_any.spawn(rt_copy.clone(), async move {
                     Ok(true)
-                }).boxed())]).await;
+                });
+                wait_any.wait_result().await;
             });
         }
     });
@@ -2687,10 +2730,10 @@ fn test_mutex_lock_bench() {
                 }
 
                 let mut map_reduce = rt_copy.map_reduce(2);
-                map_reduce.map(AsyncRuntime::Local(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
-                map_reduce.map(AsyncRuntime::Local(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
                 let _ = map_reduce.reduce(true).await;
@@ -2710,10 +2753,10 @@ fn test_mutex_lock_bench() {
                 }
 
                 let mut map_reduce = rt_copy.map_reduce(2);
-                map_reduce.map(AsyncRuntime::Multi(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
                 let _ = map_reduce.reduce(true).await;
@@ -2732,10 +2775,10 @@ fn test_mutex_lock_bench() {
                 }
 
                 let mut map_reduce = rt_copy.map_reduce(2);
-                map_reduce.map(AsyncRuntime::Multi(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
                 let _ = map_reduce.reduce(true).await;
@@ -2763,10 +2806,10 @@ fn test_mutex_lock_bench() {
                 (*v).0 += 1;
 
                 let mut map_reduce = rt_copy.map_reduce(2);
-                map_reduce.map(AsyncRuntime::Local(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
-                map_reduce.map(AsyncRuntime::Local(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
                 let _ = map_reduce.reduce(true).await;
@@ -2784,10 +2827,10 @@ fn test_mutex_lock_bench() {
                 (*v).0 += 1;
 
                 let mut map_reduce = rt_copy.map_reduce(2);
-                map_reduce.map(AsyncRuntime::Multi(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
                 let _ = map_reduce.reduce(true).await;
@@ -2804,10 +2847,10 @@ fn test_mutex_lock_bench() {
                 (*v).0 += 1;
 
                 let mut map_reduce = rt_copy.map_reduce(2);
-                map_reduce.map(AsyncRuntime::Multi(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt_copy.clone()), async move {
+                map_reduce.map(rt_copy.clone(), async move {
                     Ok(true)
                 });
                 let _ = map_reduce.reduce(true).await;
@@ -2882,7 +2925,7 @@ fn test_rw_lock() {
                     (*v).0;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2915,7 +2958,7 @@ fn test_rw_lock() {
                 let v = shared1_.read().await;
                 (*v).0;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
                     value_copy.set(true);
@@ -2951,7 +2994,7 @@ fn test_rw_lock() {
                     (*v).0;
                 }
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 let shared1_copy = shared1_.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
@@ -3020,7 +3063,7 @@ fn test_rw_lock() {
                 let mut v = shared0_.write().await;
                 (*v).0 += 1;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 let shared0_copy = shared0_.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
@@ -3040,7 +3083,7 @@ fn test_rw_lock() {
                 let v = shared1_.read().await;
                 (*v).0;
 
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 let shared1_copy = shared1_.clone();
                 rt_copy.spawn(rt_copy.alloc(), async move {
@@ -3098,7 +3141,7 @@ fn test_single_task() {
                 println!("!!!!!!run failed, reason: {:?}", e);
                 break;
             }
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(1));
         }
     });
 
@@ -3250,7 +3293,9 @@ fn test_empty_single_task() {
 
 #[test]
 fn test_empty_multi_task() {
-    let pool = MultiTaskRuntimeBuilder::default();;
+    let pool = MultiTaskRuntimeBuilder::default()
+        .init_worker_size(4)
+        .set_worker_limit(4, 4);
     let rt = pool.build();
     let rt0 = rt.clone();
     let rt1 = rt.clone();
@@ -3332,7 +3377,7 @@ fn test_single_timing_task() {
                 println!("!!!!!!run failed, reason: {:?}", e);
                 break;
             }
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(1));
         }
     });
 
@@ -3450,26 +3495,23 @@ fn test_flume() {
         }
     });
 
-    let rt = AsyncRuntime::Multi(MultiTaskRuntimeBuilder::default()
+    let rt = MultiTaskRuntimeBuilder::default()
         .init_worker_size(4)
         .set_worker_limit(4, 4)
-        .build()
-    );
+        .build();
 
     {
-        let (sender, receiver) = async_bounded(100000000);
         let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
         let start = Instant::now();
         for _ in 0..10000000 {
             let rt0_copy = rt0.clone();
             let counter_copy = counter.clone();
-            let sender_copy = sender.clone();
-            let receiver_copy = receiver.clone();
+            let (sender, receiver) = async_bounded(1);
             let future = async move {
                 rt0_copy.spawn(rt0_copy.alloc(), async move {
-                    sender_copy.send_async(true).await;
+                    sender.send_async(true).await;
                 });
-                receiver_copy.recv_async().await;
+                receiver.recv_async().await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
             };
             rt0.spawn(rt0.alloc(), future);
@@ -3477,11 +3519,6 @@ fn test_flume() {
         println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
     }
     thread::sleep(Duration::from_millis(30000));
-
-    let (sender0, receiver0) = async_bounded(10000000);
-    let (sender1, receiver1) = async_bounded(10000000);
-    let (sender2, receiver2) = async_bounded(10000000);
-    let (sender3, receiver3) = async_bounded(10000000);
 
     let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
     let counter0 = counter.clone();
@@ -3496,13 +3533,12 @@ fn test_flume() {
         for _ in 0..2500000 {
             let rt0_copy = rt_copy.clone();
             let counter_copy = counter0.clone();
-            let sender0_copy = sender0.clone();
-            let receiver0_copy = receiver0.clone();
+            let (sender, receiver) = async_bounded(1);
             let future = async move {
                 rt0_copy.spawn(rt0_copy.alloc(), async move {
-                    sender0_copy.send_async(true).await;
+                    sender.send_async(true).await;
                 });
-                receiver0_copy.recv_async().await;
+                receiver.recv_async().await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
             };
             rt_copy.spawn(rt_copy.alloc(), future);
@@ -3516,13 +3552,12 @@ fn test_flume() {
         for _ in 0..2500000 {
             let rt1_copy = rt_copy.clone();
             let counter_copy = counter1.clone();
-            let sender1_copy = sender1.clone();
-            let receiver1_copy = receiver1.clone();
+            let (sender, receiver) = async_bounded(1);
             let future = async move {
                 rt1_copy.spawn(rt1_copy.alloc(), async move {
-                    sender1_copy.send_async(true).await;
+                    sender.send_async(true).await;
                 });
-                receiver1_copy.recv_async().await;
+                receiver.recv_async().await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
             };
             rt_copy.spawn(rt_copy.alloc(), future);
@@ -3536,13 +3571,12 @@ fn test_flume() {
         for _ in 0..2500000 {
             let rt2_copy = rt_copy.clone();
             let counter_copy = counter2.clone();
-            let sender2_copy = sender2.clone();
-            let receiver2_copy = receiver2.clone();
+            let (sender, receiver) = async_bounded(1);
             let future = async move {
                 rt2_copy.spawn(rt2_copy.alloc(), async move {
-                    sender2_copy.send_async(true).await;
+                    sender.send_async(true).await;
                 });
-                receiver2_copy.recv_async().await;
+                receiver.recv_async().await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
             };
             rt_copy.spawn(rt_copy.alloc(), future);
@@ -3556,13 +3590,12 @@ fn test_flume() {
         for _ in 0..2500000 {
             let rt3_copy = rt_copy.clone();
             let counter_copy = counter3.clone();
-            let sender3_copy = sender3.clone();
-            let receiver3_copy = receiver3.clone();
+            let (sender, receiver) = async_bounded(1);
             let future = async move {
                 rt3_copy.spawn(rt3_copy.alloc(), async move {
-                    sender3_copy.send_async(true).await;
+                    sender.send_async(true).await;
                 });
-                receiver3_copy.recv_async().await;
+                receiver.recv_async().await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
             };
             rt_copy.spawn(rt_copy.alloc(), future);
@@ -3603,7 +3636,7 @@ fn test_async_value() {
             let rt0_copy = rt0.clone();
             let counter_copy = counter.clone();
             let future = async move {
-                let value = AsyncValue::new(AsyncRuntime::Local(rt0_copy.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt0_copy.spawn(rt0_copy.alloc(), async move {
                     value_copy.set(true);
@@ -3631,7 +3664,7 @@ fn test_async_value() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter0.clone();
             let future = async move {
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     value_copy.set(true);
@@ -3651,7 +3684,7 @@ fn test_async_value() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter1.clone();
             let future = async move {
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     value_copy.set(true);
@@ -3671,7 +3704,7 @@ fn test_async_value() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter2.clone();
             let future = async move {
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     value_copy.set(true);
@@ -3691,7 +3724,7 @@ fn test_async_value() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter3.clone();
             let future = async move {
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     value_copy.set(true);
@@ -3721,7 +3754,7 @@ fn test_async_value() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter0.clone();
             let future = async move {
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt0_clone.spawn(rt0_clone.alloc(), async move {
                     value_copy.set(true);
@@ -3743,7 +3776,7 @@ fn test_async_value() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter1.clone();
             let future = async move {
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt0_clone.spawn(rt0_clone.alloc(), async move {
                     value_copy.set(true);
@@ -3765,7 +3798,7 @@ fn test_async_value() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter2.clone();
             let future = async move {
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt0_clone.spawn(rt0_clone.alloc(), async move {
                     value_copy.set(true);
@@ -3787,7 +3820,7 @@ fn test_async_value() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter3.clone();
             let future = async move {
-                let value = AsyncValue::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncValue::new();
                 let value_copy = value.clone();
                 rt0_clone.spawn(rt0_clone.alloc(), async move {
                     value_copy.set(true);
@@ -3832,7 +3865,7 @@ fn test_async_variable() {
             let rt0_copy = rt0.clone();
             let counter_copy = counter.clone();
             let future = async move {
-                let value = AsyncVariable::new(AsyncRuntime::Local(rt0_copy.clone()));
+                let value = AsyncVariable::new();
                 let value_copy = value.clone();
                 rt0_copy.spawn(rt0_copy.alloc(), async move {
                     {
@@ -3864,7 +3897,7 @@ fn test_async_variable() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter0.clone();
             let future = async move {
-                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncVariable::new();
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
@@ -3898,7 +3931,7 @@ fn test_async_variable() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter1.clone();
             let future = async move {
-                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncVariable::new();
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
@@ -3932,7 +3965,7 @@ fn test_async_variable() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter2.clone();
             let future = async move {
-                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncVariable::new();
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
@@ -3966,7 +3999,7 @@ fn test_async_variable() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter3.clone();
             let future = async move {
-                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncVariable::new();
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
@@ -4010,7 +4043,7 @@ fn test_async_variable() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter0.clone();
             let future = async move {
-                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncVariable::new();
                 let value_copy = value.clone();
                 rt0_clone.spawn(rt0_clone.alloc(), async move {
                     {
@@ -4046,7 +4079,7 @@ fn test_async_variable() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter1.clone();
             let future = async move {
-                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncVariable::new();
                 let value_copy = value.clone();
                 rt0_clone.spawn(rt0_clone.alloc(), async move {
                     {
@@ -4082,7 +4115,7 @@ fn test_async_variable() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter2.clone();
             let future = async move {
-                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncVariable::new();
                 let value_copy = value.clone();
                 rt0_clone.spawn(rt0_clone.alloc(), async move {
                     {
@@ -4118,7 +4151,7 @@ fn test_async_variable() {
             let rt1_clone = rt1_copy.clone();
             let counter_copy = counter3.clone();
             let future = async move {
-                let value = AsyncVariable::new(AsyncRuntime::Multi(rt1_clone.clone()));
+                let value = AsyncVariable::new();
                 let value_copy = value.clone();
                 rt0_clone.spawn(rt0_clone.alloc(), async move {
                     {
@@ -4148,7 +4181,7 @@ fn test_async_variable() {
 }
 
 #[test]
-fn test_async_wait_timeout() {
+fn test_async_timeout() {
     let runner = SingleTaskRunner::default();
     let rt = runner.startup().unwrap();
 
@@ -4170,7 +4203,7 @@ fn test_async_wait_timeout() {
         let rt_copy = rt.clone();
         let counter_copy = counter.clone();
         rt.spawn(rt.alloc(), async move {
-            rt_copy.wait_timeout(5000).await;
+            rt_copy.timeout(5000).await;
             counter_copy.fetch_add(1, Ordering::Relaxed);
         });
     }
@@ -4183,7 +4216,7 @@ fn test_async_wait_timeout() {
         let rt0_copy = rt0.clone();
         let counter_copy = counter.clone();
         rt0.spawn(rt0.alloc(), async move {
-            rt0_copy.wait_timeout(3000).await;
+            rt0_copy.timeout(3000).await;
             counter_copy.fetch_add(1, Ordering::Relaxed);
         });
     }
@@ -4219,13 +4252,19 @@ fn test_async_wait() {
         let rt0_copy = rt0.clone();
         let rt1_copy = rt1.clone();
         let future = async move {
-            let r = rt_copy.clone().wait(AsyncRuntime::Multi(rt0_copy.clone()), async move {
-                rt0_copy.wait(AsyncRuntime::Multi(rt1_copy.clone()), async move {
-                    rt1_copy.wait(AsyncRuntime::Local(rt_copy), async move {
+            let wait = rt_copy.wait();
+            wait.spawn(rt0_copy.clone(), None, async move {
+                let wait0 = rt0_copy.wait();
+                wait0.spawn(rt1_copy.clone(), None, async move {
+                    let wait1 = rt1_copy.wait();
+                    wait1.spawn(rt_copy, None, async move {
                         Ok(true)
-                    }).await
-                }).await
-            }).await;
+                    });
+                    wait1.wait_result().await
+                });
+                wait0.wait_result().await
+            });
+            let r = wait.wait_result().await;
 
             match r {
                 Err(e) => {
@@ -4258,9 +4297,11 @@ fn test_async_wait() {
                 let rt0_copy = rt0_0.clone();
                 let counter_copy = counter0.clone();
                 let future = async move {
-                    if let Ok(r) = rt0_copy.clone().wait(AsyncRuntime::Multi(rt0_copy), async move {
+                    let wait0 = rt0_copy.wait();
+                    wait0.spawn(rt0_copy, None, async move {
                         Ok(1)
-                    }).await {
+                    });
+                    if let Ok(r) = wait0.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4275,9 +4316,11 @@ fn test_async_wait() {
                 let rt0_copy = rt0_1.clone();
                 let counter_copy = counter1.clone();
                 let future = async move {
-                    if let Ok(r) = rt0_copy.clone().wait(AsyncRuntime::Multi(rt0_copy), async move {
+                    let wait0 = rt0_copy.wait();
+                    wait0.spawn(rt0_copy, None, async move {
                         Ok(1)
-                    }).await {
+                    });
+                    if let Ok(r) = wait0.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4292,9 +4335,11 @@ fn test_async_wait() {
                 let rt0_copy = rt0_2.clone();
                 let counter_copy = counter2.clone();
                 let future = async move {
-                    if let Ok(r) = rt0_copy.clone().wait(AsyncRuntime::Multi(rt0_copy), async move {
+                    let wait0 = rt0_copy.wait();
+                    wait0.spawn(rt0_copy, None, async move {
                         Ok(1)
-                    }).await {
+                    });
+                    if let Ok(r) = wait0.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4309,9 +4354,11 @@ fn test_async_wait() {
                 let rt0_copy = rt0_3.clone();
                 let counter_copy = counter3.clone();
                 let future = async move {
-                    if let Ok(r) = rt0_copy.clone().wait(AsyncRuntime::Multi(rt0_copy), async move {
+                    let wait0 = rt0_copy.wait();
+                    wait0.spawn(rt0_copy, None, async move {
                         Ok(1)
-                    }).await {
+                    });
+                    if let Ok(r) = wait0.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4331,13 +4378,19 @@ fn test_async_wait() {
             let rt1_copy = rt1.clone();
             let counter_copy = counter.clone();
             let future = async move {
-                if let Ok(r) = rt_copy.clone().wait(AsyncRuntime::Multi(rt0_copy.clone()), async move {
-                    rt0_copy.wait(AsyncRuntime::Multi(rt1_copy.clone()), async move {
-                        rt1_copy.clone().wait(AsyncRuntime::Local(rt_copy), async move {
+                let wait = rt_copy.wait();
+                wait.spawn(rt0_copy.clone(), None, async move {
+                    let wait0 = rt0_copy.wait();
+                    wait0.spawn(rt1_copy.clone(), None, async move {
+                        let wait1 = rt1_copy.wait();
+                        wait1.spawn(rt_copy, None, async move {
                             Ok(1)
-                        }).await
-                    }).await
-                }).await {
+                        });
+                        wait1.wait_result().await
+                    });
+                    wait0.wait_result().await
+                });
+                if let Ok(r) = wait.wait_result().await {
                     counter_copy.0.fetch_add(r, Ordering::Relaxed);
                 }
             };
@@ -4365,10 +4418,10 @@ fn test_async_wait_any() {
         }
     });
 
-    let pool = MultiTaskRuntimeBuilder::default();
+    let pool = MultiTaskRuntimeBuilder::<()>::default();
     let rt0 = pool.build();
 
-    let pool = MultiTaskRuntimeBuilder::default();
+    let pool = MultiTaskRuntimeBuilder::<()>::default();
     let rt1 = pool.build();
 
     {
@@ -4376,20 +4429,23 @@ fn test_async_wait_any() {
         let rt0_copy = rt0.clone();
         let rt1_copy = rt1.clone();
         let future = async move {
-            let f0 = Box::new(async move {
+            let f0 = async move {
                 let mut rng = rand::thread_rng();
                 let timeout: u64 = rng.gen_range(0, 10000);
                 thread::sleep(Duration::from_millis(timeout));
                 Ok("rt0-".to_string() + timeout.to_string().as_str())
-            }).boxed();
-            let f1 = Box::new(async move {
+            };
+            let f1 = async move {
                 let mut rng = rand::thread_rng();
                 let timeout: u64 = rng.gen_range(0, 10000);
                 thread::sleep(Duration::from_millis(timeout));
                 Ok("rt1-".to_string() + timeout.to_string().as_str())
-            }).boxed();
+            };
 
-            match rt_copy.wait_any(vec![(AsyncRuntime::Multi(rt0_copy), f0), (AsyncRuntime::Multi(rt1_copy), f1)]).await {
+            let wait_any = rt_copy.wait_any(2);
+            wait_any.spawn(rt0_copy.clone(), f0);
+            wait_any.spawn(rt0_copy.clone(), f1);
+            match wait_any.wait_result().await {
                 Err(e) => {
                     println!("!!!!!!wait any failed, reason: {:?}", e);
                 },
@@ -4420,13 +4476,16 @@ fn test_async_wait_any() {
                 let rt0_copy = rt0_0.clone();
                 let counter_copy = counter0.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any(vec![(AsyncRuntime::Multi(rt0_copy.clone()), f0), (AsyncRuntime::Multi(rt0_copy.clone()), f1)]).await {
+                    };
+                    let wait_any = rt0_copy.wait_any(2);
+                    wait_any.spawn(rt0_copy.clone(), f0);
+                    wait_any.spawn(rt0_copy.clone(), f1);
+                    if let Ok(r) = wait_any.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4441,13 +4500,16 @@ fn test_async_wait_any() {
                 let rt0_copy = rt0_1.clone();
                 let counter_copy = counter1.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any(vec![(AsyncRuntime::Multi(rt0_copy.clone()), f0), (AsyncRuntime::Multi(rt0_copy.clone()), f1)]).await {
+                    };
+                    let wait_any = rt0_copy.wait_any(2);
+                    wait_any.spawn(rt0_copy.clone(), f0);
+                    wait_any.spawn(rt0_copy.clone(), f1);
+                    if let Ok(r) = wait_any.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4462,13 +4524,16 @@ fn test_async_wait_any() {
                 let rt0_copy = rt0_2.clone();
                 let counter_copy = counter2.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any(vec![(AsyncRuntime::Multi(rt0_copy.clone()), f0), (AsyncRuntime::Multi(rt0_copy.clone()), f1)]).await {
+                    };
+                    let wait_any = rt0_copy.wait_any(2);
+                    wait_any.spawn(rt0_copy.clone(), f0);
+                    wait_any.spawn(rt0_copy.clone(), f1);
+                    if let Ok(r) = wait_any.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4483,13 +4548,16 @@ fn test_async_wait_any() {
                 let rt0_copy = rt0_3.clone();
                 let counter_copy = counter3.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any(vec![(AsyncRuntime::Multi(rt0_copy.clone()), f0), (AsyncRuntime::Multi(rt0_copy.clone()), f1)]).await {
+                    };
+                    let wait_any = rt0_copy.wait_any(2);
+                    wait_any.spawn(rt0_copy.clone(), f0);
+                    wait_any.spawn(rt0_copy.clone(), f1);
+                    if let Ok(r) = wait_any.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4528,13 +4596,16 @@ fn test_async_wait_any() {
                 let rt1_copy = rt1_0.clone();
                 let counter_copy = counter0.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any(vec![(AsyncRuntime::Multi(rt1_copy.clone()), f0), (AsyncRuntime::Multi(rt1_copy), f1)]).await {
+                    };
+                    let wait_any = rt0_copy.wait_any(2);
+                    wait_any.spawn(rt1_copy.clone(), f0);
+                    wait_any.spawn(rt1_copy.clone(), f1);
+                    if let Ok(r) = wait_any.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4551,13 +4622,16 @@ fn test_async_wait_any() {
                 let rt1_copy = rt1_1.clone();
                 let counter_copy = counter1.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any(vec![(AsyncRuntime::Multi(rt1_copy.clone()), f0), (AsyncRuntime::Multi(rt1_copy), f1)]).await {
+                    };
+                    let wait_any = rt0_copy.wait_any(2);
+                    wait_any.spawn(rt0_copy.clone(), f0);
+                    wait_any.spawn(rt0_copy.clone(), f1);
+                    if let Ok(r) = wait_any.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4574,13 +4648,16 @@ fn test_async_wait_any() {
                 let rt1_copy = rt1_2.clone();
                 let counter_copy = counter2.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any(vec![(AsyncRuntime::Multi(rt1_copy.clone()), f0), (AsyncRuntime::Multi(rt1_copy), f1)]).await {
+                    };
+                    let wait_any = rt0_copy.wait_any(2);
+                    wait_any.spawn(rt0_copy.clone(), f0);
+                    wait_any.spawn(rt0_copy.clone(), f1);
+                    if let Ok(r) = wait_any.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4597,13 +4674,16 @@ fn test_async_wait_any() {
                 let rt1_copy = rt1_3.clone();
                 let counter_copy = counter3.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any(vec![(AsyncRuntime::Multi(rt1_copy.clone()), f0), (AsyncRuntime::Multi(rt1_copy), f1)]).await {
+                    };
+                    let wait_any = rt0_copy.wait_any(2);
+                    wait_any.spawn(rt0_copy.clone(), f0);
+                    wait_any.spawn(rt0_copy.clone(), f1);
+                    if let Ok(r) = wait_any.wait_result().await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4632,10 +4712,10 @@ fn test_async_wait_any_callback() {
         }
     });
 
-    let pool = MultiTaskRuntimeBuilder::default();
+    let pool = MultiTaskRuntimeBuilder::<()>::default();
     let rt0 = pool.build();
 
-    let pool = MultiTaskRuntimeBuilder::default();
+    let pool = MultiTaskRuntimeBuilder::<()>::default();
     let rt1 = pool.build();
 
     {
@@ -4643,23 +4723,25 @@ fn test_async_wait_any_callback() {
         let rt0_copy = rt0.clone();
         let rt1_copy = rt1.clone();
         let future = async move {
-            let f0 = Box::new(async move {
+            let f0 = async move {
                 let mut rng = rand::thread_rng();
                 let timeout: u64 = rng.gen_range(0, 10000);
                 thread::sleep(Duration::from_millis(timeout));
                 Ok("rt0-".to_string() + timeout.to_string().as_str())
-            }).boxed();
-            let f1 = Box::new(async move {
+            };
+            let f1 = async move {
                 let mut rng = rand::thread_rng();
                 let timeout: u64 = rng.gen_range(0, 10000);
                 thread::sleep(Duration::from_millis(timeout));
                 Ok("rt1-".to_string() + timeout.to_string().as_str())
-            }).boxed();
+            };
 
-            match rt_copy.wait_any_callback(vec![(AsyncRuntime::Multi(rt0_copy), f0), (AsyncRuntime::Multi(rt1_copy), f1)],
-                                            move |result| {
-                                                true
-                                            }).await {
+            let wait_any_callback = rt_copy.wait_any_callback(2);
+            wait_any_callback.spawn(rt0_copy, f0);
+            wait_any_callback.spawn(rt1_copy, f1);
+            match wait_any_callback.wait_result(move |result| {
+                true
+            }).await {
                 Err(e) => {
                     println!("!!!!!!wait any failed, reason: {:?}", e);
                 },
@@ -4690,16 +4772,18 @@ fn test_async_wait_any_callback() {
                 let rt0_copy = rt0_0.clone();
                 let counter_copy = counter0.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any_callback(vec![(AsyncRuntime::Multi(rt0_copy.clone()), f0), (AsyncRuntime::Multi(rt0_copy.clone()), f1)],
-                                                              move |result| {
-                                                                  true
-                                                              }).await {
+                    };
+                    let wait_any_callback = rt0_copy.wait_any_callback(2);
+                    wait_any_callback.spawn(rt0_copy.clone(), f0);
+                    wait_any_callback.spawn(rt0_copy, f1);
+                    if let Ok(r) = wait_any_callback.wait_result(move |result| {
+                        true
+                    }).await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4714,16 +4798,18 @@ fn test_async_wait_any_callback() {
                 let rt0_copy = rt0_1.clone();
                 let counter_copy = counter1.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any_callback(vec![(AsyncRuntime::Multi(rt0_copy.clone()), f0), (AsyncRuntime::Multi(rt0_copy.clone()), f1)],
-                                                              move |result| {
-                                                                  true
-                                                              }).await {
+                    };
+                    let wait_any_callback = rt0_copy.wait_any_callback(2);
+                    wait_any_callback.spawn(rt0_copy.clone(), f0);
+                    wait_any_callback.spawn(rt0_copy, f1);
+                    if let Ok(r) = wait_any_callback.wait_result(move |result| {
+                        true
+                    }).await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4738,16 +4824,18 @@ fn test_async_wait_any_callback() {
                 let rt0_copy = rt0_2.clone();
                 let counter_copy = counter2.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any_callback(vec![(AsyncRuntime::Multi(rt0_copy.clone()), f0), (AsyncRuntime::Multi(rt0_copy.clone()), f1)],
-                                                              move |result| {
-                                                                  true
-                                                              }).await {
+                    };
+                    let wait_any_callback = rt0_copy.wait_any_callback(2);
+                    wait_any_callback.spawn(rt0_copy.clone(), f0);
+                    wait_any_callback.spawn(rt0_copy, f1);
+                    if let Ok(r) = wait_any_callback.wait_result(move |result| {
+                        true
+                    }).await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4762,16 +4850,18 @@ fn test_async_wait_any_callback() {
                 let rt0_copy = rt0_3.clone();
                 let counter_copy = counter3.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any_callback(vec![(AsyncRuntime::Multi(rt0_copy.clone()), f0), (AsyncRuntime::Multi(rt0_copy.clone()), f1)],
-                                                              move |result| {
-                                                                  true
-                                                              }).await {
+                    };
+                    let wait_any_callback = rt0_copy.wait_any_callback(2);
+                    wait_any_callback.spawn(rt0_copy.clone(), f0);
+                    wait_any_callback.spawn(rt0_copy, f1);
+                    if let Ok(r) = wait_any_callback.wait_result(move |result| {
+                        true
+                    }).await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4810,16 +4900,18 @@ fn test_async_wait_any_callback() {
                 let rt1_copy = rt1_0.clone();
                 let counter_copy = counter0.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any_callback(vec![(AsyncRuntime::Multi(rt1_copy.clone()), f0), (AsyncRuntime::Multi(rt1_copy), f1)],
-                                                              move |result| {
-                                                                  true
-                                                              }).await {
+                    };
+                    let wait_any_callback = rt0_copy.wait_any_callback(2);
+                    wait_any_callback.spawn(rt1_copy.clone(), f0);
+                    wait_any_callback.spawn(rt1_copy, f1);
+                    if let Ok(r) = wait_any_callback.wait_result(move |result| {
+                        true
+                    }).await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4836,16 +4928,18 @@ fn test_async_wait_any_callback() {
                 let rt1_copy = rt1_1.clone();
                 let counter_copy = counter1.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any_callback(vec![(AsyncRuntime::Multi(rt1_copy.clone()), f0), (AsyncRuntime::Multi(rt1_copy), f1)],
-                                                              move |result| {
-                                                                  true
-                                                              }).await {
+                    };
+                    let wait_any_callback = rt0_copy.wait_any_callback(2);
+                    wait_any_callback.spawn(rt1_copy.clone(), f0);
+                    wait_any_callback.spawn(rt1_copy, f1);
+                    if let Ok(r) = wait_any_callback.wait_result(move |result| {
+                        true
+                    }).await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4862,16 +4956,18 @@ fn test_async_wait_any_callback() {
                 let rt1_copy = rt1_2.clone();
                 let counter_copy = counter2.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any_callback(vec![(AsyncRuntime::Multi(rt1_copy.clone()), f0), (AsyncRuntime::Multi(rt1_copy), f1)],
-                                                              move |result| {
-                                                                  true
-                                                              }).await {
+                    };
+                    let wait_any_callback = rt0_copy.wait_any_callback(2);
+                    wait_any_callback.spawn(rt1_copy.clone(), f0);
+                    wait_any_callback.spawn(rt1_copy, f1);
+                    if let Ok(r) = wait_any_callback.wait_result(move |result| {
+                        true
+                    }).await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4888,16 +4984,18 @@ fn test_async_wait_any_callback() {
                 let rt1_copy = rt1_3.clone();
                 let counter_copy = counter3.clone();
                 let future = async move {
-                    let f0 = Box::new(async move {
+                    let f0 = async move {
                         Ok(1)
-                    }).boxed();
-                    let f1 = Box::new(async move {
+                    };
+                    let f1 = async move {
                         Ok(1)
-                    }).boxed();
-                    if let Ok(r) = rt0_copy.wait_any_callback(vec![(AsyncRuntime::Multi(rt1_copy.clone()), f0), (AsyncRuntime::Multi(rt1_copy), f1)],
-                                                              move |result| {
-                                                                  true
-                                                              }).await {
+                    };
+                    let wait_any_callback = rt0_copy.wait_any_callback(2);
+                    wait_any_callback.spawn(rt1_copy.clone(), f0);
+                    wait_any_callback.spawn(rt1_copy, f1);
+                    if let Ok(r) = wait_any_callback.wait_result(move |result| {
+                        true
+                    }).await {
                         counter_copy.0.fetch_add(r, Ordering::Relaxed);
                     }
                 };
@@ -4943,14 +5041,14 @@ fn test_async_wait_all() {
             let cb: SendableFn = SendableFn(Box::new(move |v: &mut Vec<u8>| {
                 v.clone()
             }));
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(cb)
             });
 
             let cb: SendableFn = SendableFn(Box::new(move |v: &mut Vec<u8>| {
                 v.clone()
             }));
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(cb)
             });
 
@@ -4970,68 +5068,68 @@ fn test_async_wait_all() {
         let rt1_copy = rt1.clone();
         let future = async move {
             let mut map_reduce = rt_copy.map_reduce(10);
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(0)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+            map_reduce.map(rt1_copy.clone(), async move {
                 Ok(1)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(2)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+            map_reduce.map(rt1_copy.clone(), async move {
                 Ok(3)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(4)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+            map_reduce.map(rt1_copy.clone(), async move {
                 Ok(5)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(6)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+            map_reduce.map(rt1_copy.clone(), async move {
                 Ok(7)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(8)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+            map_reduce.map(rt1_copy.clone(), async move {
                 Ok(9)
             });
 
             println!("!!!!!!map result: {:?}", map_reduce.reduce(false).await);
 
             let mut map_reduce = rt_copy.map_reduce(10);
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(0)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+            map_reduce.map(rt1_copy.clone(), async move {
                 Ok(1)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(2)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+            map_reduce.map(rt1_copy.clone(), async move {
                 Ok(3)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(4)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+            map_reduce.map(rt1_copy.clone(), async move {
                 Ok(5)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(6)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+            map_reduce.map(rt1_copy.clone(), async move {
                 Ok(7)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+            map_reduce.map(rt0_copy.clone(), async move {
                 Ok(8)
             });
-            map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+            map_reduce.map(rt1_copy.clone(), async move {
                 Ok(9)
             });
 
@@ -5049,34 +5147,34 @@ fn test_async_wait_all() {
             let counter_copy = counter.clone();
             let future = async move {
                 let mut map_reduce = rt0_copy.map_reduce(10);
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(0)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(1)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(2)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(3)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(4)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(5)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(6)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(7)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(8)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(9)
                 });
                 if let Ok(_) = map_reduce.reduce(true).await {
@@ -5099,34 +5197,34 @@ fn test_async_wait_all() {
             let counter_copy = counter.clone();
             let future = async move {
                 let mut map_reduce = rt_copy.map_reduce(10);
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(0)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+                map_reduce.map(rt1_copy.clone(), async move {
                     Ok(1)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(2)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+                map_reduce.map(rt1_copy.clone(), async move {
                     Ok(3)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(4)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+                map_reduce.map(rt1_copy.clone(), async move {
                     Ok(5)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(6)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+                map_reduce.map(rt1_copy.clone(), async move {
                     Ok(7)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt0_copy.clone()), async move {
+                map_reduce.map(rt0_copy.clone(), async move {
                     Ok(8)
                 });
-                map_reduce.map(AsyncRuntime::Multi(rt1_copy.clone()), async move {
+                map_reduce.map(rt1_copy.clone(), async move {
                     Ok(9)
                 });
                 if let Ok(_) = map_reduce.reduce(true).await {
@@ -5143,21 +5241,18 @@ fn test_async_wait_all() {
 
 #[test]
 fn test_worker_runtime() {
-    let thread_status = Arc::new(AtomicBool::new(true));
-    let runner = SingleTaskRunner::default();
-    let thread_waker = runner.get_thread_waker().unwrap();
-    let rt = AsyncRuntime::Worker(Arc::new(AtomicBool::new(true)), thread_waker.clone(), runner.startup().unwrap());
+    let runner = WorkerTaskRunner::default();
+    let rt = runner.get_runtime();
 
+    let runner_copy = runner.clone();
     let rt_copy = rt.clone();
-    spawn_worker_thread("Test-Worker-Runtime",
-                        1024 * 1024,
-                        thread_status,
-                        thread_waker,
+    runner.startup("Test-Worker-Runtime",
+                   1024 * 1024,
                         1000,
                         None,
                         move || {
                             let start = Instant::now();
-                            if let Ok(len) = runner.run() {
+                            if let Ok(len) = runner_copy.run() {
                                 if len > 0 {
                                     (false, Instant::now() - start)
                                 } else {
@@ -5181,7 +5276,7 @@ fn test_worker_runtime() {
             let rt0_copy = rt0.clone();
             let counter_copy = counter.clone();
             rt.spawn(rt.alloc(), async move {
-                let result = AsyncValue::new(AsyncRuntime::Multi(rt0_copy.clone()));
+                let result = AsyncValue::new();
                 let result_copy = result.clone();
                 rt0_copy.spawn(rt0_copy.alloc(), async move {
                     result_copy.set(1);
