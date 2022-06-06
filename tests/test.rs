@@ -3871,8 +3871,8 @@ fn test_async_variable() {
                     {
                         let mut locked = value_copy.lock().unwrap();
                         *locked = Some(true);
+                        locked.finish();
                     }
-                    value_copy.finish();
                 });
                 value.await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
@@ -3903,18 +3903,18 @@ fn test_async_variable() {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 value.await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
@@ -3937,18 +3937,18 @@ fn test_async_variable() {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 value.await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
@@ -3971,18 +3971,18 @@ fn test_async_variable() {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 value.await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
@@ -4005,18 +4005,18 @@ fn test_async_variable() {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 value.await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
@@ -4045,27 +4045,27 @@ fn test_async_variable() {
             let future = async move {
                 let value = AsyncVariable::new();
                 let value_copy = value.clone();
-                rt0_clone.spawn(rt0_clone.alloc(), async move {
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 value.await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
             };
-            rt1_copy.spawn(rt1_copy.alloc(), future);
+            rt0_copy.spawn(rt0_copy.alloc(), future);
         }
         println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
     });
@@ -4081,27 +4081,27 @@ fn test_async_variable() {
             let future = async move {
                 let value = AsyncVariable::new();
                 let value_copy = value.clone();
-                rt0_clone.spawn(rt0_clone.alloc(), async move {
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 value.await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
             };
-            rt1_copy.spawn(rt1_copy.alloc(), future);
+            rt0_copy.spawn(rt0_copy.alloc(), future);
         }
         println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
     });
@@ -4117,27 +4117,27 @@ fn test_async_variable() {
             let future = async move {
                 let value = AsyncVariable::new();
                 let value_copy = value.clone();
-                rt0_clone.spawn(rt0_clone.alloc(), async move {
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 value.await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
             };
-            rt1_copy.spawn(rt1_copy.alloc(), future);
+            rt0_copy.spawn(rt0_copy.alloc(), future);
         }
         println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
     });
@@ -4153,27 +4153,27 @@ fn test_async_variable() {
             let future = async move {
                 let value = AsyncVariable::new();
                 let value_copy = value.clone();
-                rt0_clone.spawn(rt0_clone.alloc(), async move {
+                rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 let value_copy = value.clone();
                 rt1_clone.spawn(rt1_clone.alloc(), async move {
                     {
                         if let Some(mut locked) = value_copy.lock() {
                             *locked = Some(true);
+                            locked.finish();
                         }
                     }
-                    value_copy.finish();
                 });
                 value.await;
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
             };
-            rt1_copy.spawn(rt1_copy.alloc(), future);
+            rt0_copy.spawn(rt0_copy.alloc(), future);
         }
         println!("!!!!!!spawn ok, time: {:?}", Instant::now() - start);
     });
