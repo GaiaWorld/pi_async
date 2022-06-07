@@ -332,6 +332,18 @@ impl<
     }
 }
 
+impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+> From<(Arc<AtomicBool>, Arc<(AtomicBool, Mutex<()>, Condvar)>, SingleTaskRuntime<O, P>)> for WorkerRuntime<O, P> {
+    //将外部的工作者状态，工作者唤醒器和指定任务池的单线程异步运行时转换成工作者异步运行时
+    fn from(from: (Arc<AtomicBool>,
+                   Arc<(AtomicBool, Mutex<()>, Condvar)>,
+                   SingleTaskRuntime<O, P>,)) -> Self {
+        WorkerRuntime(Arc::new(from))
+    }
+}
+
 impl<O: Default + 'static> Default for WorkerTaskRunner<O> {
     fn default() -> Self {
         WorkerTaskRunner::new(SingleTaskPool::default(),
