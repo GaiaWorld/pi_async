@@ -234,7 +234,22 @@ impl<
     O: Default + 'static,
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
 > WorkerRuntime<O, P> {
-    /// 获取当前单线程异步运行时的本地异步运行时
+    /// 获取工作者异步运行时的工作者状态
+    pub fn get_worker_status(&self) -> &Arc<AtomicBool> {
+        &(self.0).0
+    }
+
+    /// 获取工作者异步运行时的工作者线程状态
+    pub fn get_worker_waker(&self) -> &Arc<(AtomicBool, Mutex<()>, Condvar)> {
+        &(self.0).1
+    }
+
+    /// 获取工作者异步运行时的单线程异步运行时
+    pub fn get_worker_runtime(&self) -> &SingleTaskRuntime<O, P> {
+        &(self.0).2
+    }
+
+    /// 获取当前工作者异步运行时的本地异步运行时
     pub fn to_local_runtime(&self) -> LocalAsyncRuntime<O> {
         LocalAsyncRuntime {
             inner: self.as_raw(),
@@ -245,13 +260,13 @@ impl<
         }
     }
 
-    // 获取当前单线程异步运行时的指针
+    // 获取当前工作者异步运行时的指针
     #[inline]
     pub(crate) fn as_raw(&self) -> *const () {
         Arc::into_raw(self.0.clone()) as *const ()
     }
 
-    // 获取指定指针的单线程异步运行时
+    // 获取指定指针的工作者异步运行时
     #[inline]
     pub(crate) fn from_raw(raw: *const ()) -> Self {
         let inner = unsafe {
@@ -336,7 +351,7 @@ impl<
     O: Default + 'static,
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
 > From<(Arc<AtomicBool>, Arc<(AtomicBool, Mutex<()>, Condvar)>, SingleTaskRuntime<O, P>)> for WorkerRuntime<O, P> {
-    //将外部的工作者状态，工作者唤醒器和指定任务池的单线程异步运行时转换成工作者异步运行时
+    //将外部的工作者状态，工作者线程唤醒器和指定任务池的单线程异步运行时转换成工作者异步运行时
     fn from(from: (Arc<AtomicBool>,
                    Arc<(AtomicBool, Mutex<()>, Condvar)>,
                    SingleTaskRuntime<O, P>,)) -> Self {
