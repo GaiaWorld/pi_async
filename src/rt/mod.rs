@@ -13,7 +13,6 @@ use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 use std::time::{Instant, Duration};
 use std::cell::{RefCell, UnsafeCell};
-use std::detect::__is_feature_detected::sha;
 use std::panic::{PanicInfo, set_hook};
 use std::task::{Waker, Context, Poll};
 use std::io::{Error, Result, ErrorKind};
