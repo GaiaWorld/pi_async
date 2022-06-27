@@ -25,6 +25,7 @@ use futures::stream::{Stream, BoxStream};
 pub mod single_thread;
 pub mod multi_thread;
 pub mod worker_thread;
+pub mod async_pipeline;
 
 use libc;
 use futures::{future::{FutureExt, BoxFuture}, task::ArcWake};
