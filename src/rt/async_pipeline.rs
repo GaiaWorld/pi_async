@@ -239,7 +239,7 @@ pub type BoxReceiver<'a, T> = Pin<Box<dyn AsyncReceiver<T> + Send + 'a, Global>>
 ///
 /// 异步接收器
 ///
-pub trait AsyncReceiver<T>: Stream<Item = T> {}
+pub trait AsyncReceiver<T>: Stream<Item = T> + FusedStream {}
 
 ///
 /// 扩展的异步接收器
@@ -361,7 +361,7 @@ pub trait AsyncPipeLine<
     StreamFrame,
     SinkFrame = StreamFrame,
     Err = Error
->: Sink<SinkFrame, Error = Err> + Stream<Item = StreamFrame> {}
+>: Sink<SinkFrame, Error = Err> + Stream<Item = StreamFrame> + FusedStream {}
 
 ///
 /// 扩展的异步管道
