@@ -273,19 +273,30 @@ impl<T> Stream for PipeReceiver<T> {
             return Poll::Ready(None);
         }
 
-        if let Some(frame) = self.queue.pop() {
-            //当前的读流有数据
-            Poll::Ready(Some(frame))
-        } else {
-            //当前的读流无数据
-            let mut spin_len = 1;
-            loop {
+        loop {
+            if let Some(frame) = self.queue.pop() {
+                //当前的读流有数据
+                return Poll::Ready(Some(frame));
+            } else {
+                //当前的读流无数据
+                let mut spin_len = 1;
                 match self.status.compare_exchange(0,
                                                    1,
                                                    Ordering::AcqRel,
                                                    Ordering::Relaxed) {
+                    Err(3) => {
+                        //对端写流已经在异步等待唤醒，则立即唤醒对端写流，并继续内部重试
+                        unsafe {
+                            if let Some(waker) = (*self.waker.get()).take() {
+                                //对端设置的唤醒器存在，则立即唤醒对端的写流
+                                waker.wake();
+                                self.status.store(0, Ordering::Release); //设置对端写流和当前读流的状态为已初始化
+                            }
+                        }
+                        continue;
+                    },
                     Err(_) => {
-                        //对端写流或当前读流已经在异步等待唤醒，或者已被非当前调用锁住，则休眠后继续内部重试
+                        //当前读流已经在异步等待唤醒，或者已被非当前调用锁住，则休眠后继续内部重试
                         spin_len = spin(spin_len);
                         continue;
                     },
@@ -455,19 +466,30 @@ impl<T, U> Stream for AsyncDownStream<T, U> {
             return Poll::Ready(None);
         }
 
-        if let Some(frame) = self.0.stream.pop() {
-            //当前的读流有数据
-            Poll::Ready(Some(frame))
-        } else {
-            //当前的读流无数据
-            let mut spin_len = 1;
-            loop {
+        loop {
+            if let Some(frame) = self.0.stream.pop() {
+                //当前的读流有数据
+                return Poll::Ready(Some(frame));
+            } else {
+                //当前的读流无数据
+                let mut spin_len = 1;
                 match self.0.stream_status.compare_exchange(0,
                                                             1,
                                                             Ordering::AcqRel,
                                                             Ordering::Relaxed) {
+                    Err(3) => {
+                        //对端写流已经在异步等待唤醒，则立即唤醒对端写流，并继续内部重试
+                        unsafe {
+                            if let Some(waker) = (*self.0.stream_waker.get()).take() {
+                                //对端设置的唤醒器存在，则立即唤醒对端的写流
+                                waker.wake();
+                                self.0.stream_status.store(0, Ordering::Release); //设置对端写流和当前读流的状态为已初始化
+                            }
+                        }
+                        continue;
+                    },
                     Err(_) => {
-                        //对端写流或当前读流已经在异步等待唤醒，或者已被非当前调用锁住，则休眠后继续内部重试
+                        //当前读流已经在异步等待唤醒，或者已被非当前调用锁住，则休眠后继续内部重试
                         spin_len = spin(spin_len);
                         continue;
                     },
@@ -714,19 +736,30 @@ impl<U, T> Stream for AsyncUpStream<U, T> {
             return Poll::Ready(None);
         }
 
-        if let Some(frame) = self.0.stream.pop() {
-            //当前的读流有数据
-            Poll::Ready(Some(frame))
-        } else {
-            //当前的读流无数据
-            let mut spin_len = 1;
-            loop {
+        loop {
+            if let Some(frame) = self.0.stream.pop() {
+                //当前的读流有数据
+                return Poll::Ready(Some(frame));
+            } else {
+                //当前的读流无数据
+                let mut spin_len = 1;
                 match self.0.stream_status.compare_exchange(0,
                                                             1,
                                                             Ordering::AcqRel,
                                                             Ordering::Relaxed) {
+                    Err(3) => {
+                        //对端写流已经在异步等待唤醒，则立即唤醒对端写流，并继续内部重试
+                        unsafe {
+                            if let Some(waker) = (*self.0.stream_waker.get()).take() {
+                                //对端设置的唤醒器存在，则立即唤醒对端的写流
+                                waker.wake();
+                                self.0.stream_status.store(0, Ordering::Release); //设置对端写流和当前读流的状态为已初始化
+                            }
+                        }
+                        continue;
+                    },
                     Err(_) => {
-                        //对端写流或当前读流已经在异步等待唤醒，或者已被非当前调用锁住，则休眠后继续内部重试
+                        //当前读流已经在异步等待唤醒，或者已被非当前调用锁住，则休眠后继续内部重试
                         spin_len = spin(spin_len);
                         continue;
                     },

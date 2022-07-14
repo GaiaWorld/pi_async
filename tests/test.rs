@@ -5505,6 +5505,61 @@ fn test_async_channel() {
 }
 
 #[test]
+fn test_async_channel_once() {
+    let rt0 = MultiTaskRuntimeBuilder::default().build();
+    let rt1 = MultiTaskRuntimeBuilder::default().build();
+
+    let (sender, receiver) = channel::<i32>(1);
+    let mut sender = sender.pin_boxed();
+    let mut receiver = receiver.pin_boxed();
+
+    rt0.spawn(rt0.alloc(), async move {
+        while let Some(frame) = receiver.next().await {
+            println!("Receiver next ok, frame: {:?}", frame);
+        }
+        println!("Receiver next finish");
+    });
+
+    rt1.spawn(rt1.alloc(), async move {
+        for frame in 0..1000 {
+            loop {
+                if let Err(e) = sender.feed(frame).await {
+                    if e.kind() != ErrorKind::WouldBlock {
+                        panic!("Sender feed failed, frame: {:?}, reason: {:?}", frame, e);
+                    }
+                    continue;
+                }
+
+                if let Err(e) = sender.flush().await {
+                    if e.kind() != ErrorKind::WouldBlock {
+                        panic!("Sender flush failed, frame: {:?}, reason: {:?}", frame, e);
+                    }
+                    continue;
+                }
+
+                break;
+            }
+
+            println!("Sender feed ok, frame: {:?}", frame);
+        }
+        println!("Sender send finish");
+
+        loop {
+            if let Err(e) = sender.close().await {
+                if e.kind() != ErrorKind::WouldBlock {
+                    panic!("Sender close failed, reason: {:?}", e);
+                }
+                continue;
+            }
+            break;
+        }
+        println!("Sender closed");
+    });
+
+    thread::sleep(Duration::from_millis(1000000000));
+}
+
+#[test]
 fn test_async_pipeline() {
     let rt0 = MultiTaskRuntimeBuilder::default().build();
     let rt1 = MultiTaskRuntimeBuilder::default().build();
@@ -5589,6 +5644,95 @@ fn test_async_pipeline() {
             println!("Up stream next ok, frame: {:?}", frame);
         }
         println!("Up stream next finish");
+    });
+
+    thread::sleep(Duration::from_millis(1000000000));
+}
+
+#[test]
+fn test_async_pipeline_once() {
+    let rt0 = MultiTaskRuntimeBuilder::default().build();
+    let rt1 = MultiTaskRuntimeBuilder::default().build();
+
+    let (down_stream, up_stream) = pipeline::<i32, String>(1);
+    let mut down_stream = down_stream.pin_boxed();
+    let mut up_stream = up_stream.pin_boxed();
+
+    rt0.spawn(rt0.alloc(), async move {
+        while let Some(frame) = down_stream.next().await {
+            println!("Down stream next ok, frame: {:?}", frame);
+
+            loop {
+                if let Err(e) = down_stream.feed(frame.to_string() + " ok").await {
+                    if e.kind() != ErrorKind::WouldBlock {
+                        panic!("Down stream feed failed, frame: {:?}, reason: {:?}", frame, e);
+                    }
+                    continue;
+                }
+
+                if let Err(e) = down_stream.flush().await {
+                    if e.kind() != ErrorKind::WouldBlock {
+                        panic!("Down stream flush failed, frame: {:?}, reason: {:?}", frame, e);
+                    }
+                    continue;
+                }
+
+                println!("Down stream feed ok, frame: {:?}", frame);
+                break;
+            }
+        }
+        println!("Down stream next and send finish");
+
+        loop {
+            if let Err(e) = down_stream.close().await {
+                if e.kind() != ErrorKind::WouldBlock {
+                    panic!("Down stream close failed, reason: {:?}", e);
+                }
+                continue;
+            }
+            break;
+        }
+        println!("Down stream closed");
+    });
+
+    rt1.spawn(rt1.alloc(), async move {
+        for frame in 0..1000 {
+            loop {
+                if let Err(e) = up_stream.feed(frame).await {
+                    if e.kind() != ErrorKind::WouldBlock {
+                        panic!("Up stream feed failed, frame: {:?}, reason: {:?}", frame, e);
+                    }
+                    continue;
+                }
+
+                if let Err(e) = up_stream.flush().await {
+                    if e.kind() != ErrorKind::WouldBlock {
+                        panic!("Up stream flush failed, frame: {:?}, reason: {:?}", frame, e);
+                    }
+                    continue;
+                }
+
+                break;
+            }
+            println!("Up stream feed ok, frame: {:?}", frame);
+
+            if let Some(frame) = up_stream.next().await {
+                println!("Up stream next ok, frame: {:?}", frame);
+            }
+        }
+        println!("Up stream send finish");
+        println!("Up stream next finish");
+
+        loop {
+            if let Err(e) = up_stream.close().await {
+                if e.kind() != ErrorKind::WouldBlock {
+                    panic!("Up stream close failed, reason: {:?}", e);
+                }
+                continue;
+            }
+            break;
+        }
+        println!("Up stream closed");
     });
 
     thread::sleep(Duration::from_millis(1000000000));
