@@ -5,17 +5,18 @@ use std::thread;
 use std::rc::Rc;
 use std::pin::Pin;
 use std::vec::IntoIter;
-use std::ptr::{null, null_mut};
 use std::future::Future;
 use std::mem::transmute;
 use std::sync::{Arc, Weak};
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
-use std::time::{Instant, Duration};
+use std::ptr::{null, null_mut};
 use std::cell::{RefCell, UnsafeCell};
 use std::panic::{PanicInfo, set_hook};
 use std::task::{Waker, Context, Poll};
 use std::io::{Error, Result, ErrorKind};
+use std::alloc::{Layout, set_alloc_error_hook};
+use std::time::{Instant, Duration, SystemTime};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, AtomicIsize, AtomicPtr, Ordering};
@@ -34,6 +35,7 @@ use crossbeam_channel::{Sender, Receiver, unbounded};
 use crossbeam_queue::ArrayQueue;
 use flume::{Sender as AsyncSender, Receiver as AsyncReceiver, bounded as async_bounded};
 use num_cpus;
+use backtrace::Backtrace;
 
 use pi_hash::XHashMap;
 use pi_local_timer::local_timer::LocalTimer;
@@ -1786,6 +1788,20 @@ pub fn register_global_panic_handler<Handler>(handler: Handler)
             std::process::exit(exit_code);
         }
     }));
+}
+
+/// 替换全局内存分配错误处理器
+pub fn replace_global_alloc_error_handler() {
+    set_alloc_error_hook(global_alloc_error_handle);
+}
+
+fn global_alloc_error_handle(layout: Layout) {
+    let bt = Backtrace::new();
+    eprintln!("[UTC: {}][Thread: {}]Global memory allocation of {:?} bytes failed, stacktrace: \n{:?}",
+              SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis(),
+              thread::current().name().unwrap_or(""),
+              layout.size(),
+              bt);
 }
 
 ///单调递增时间

@@ -4,6 +4,7 @@
 #![allow(warnings)]
 #![feature(panic_info_message)]
 #![feature(allocator_api)]
+#![feature(alloc_error_hook)]
 
 extern crate futures;
 extern crate crossbeam_channel;

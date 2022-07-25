@@ -43,7 +43,7 @@ use pi_async::{AsyncExecutorResult, AsyncExecutor, AsyncSpawner,
                       spin_lock::SpinLock,
                       mutex_lock::Mutex,
                       rw_lock::RwLock},
-               rt::{TaskId, AsyncTask, AsyncRuntimeBuilder, AsyncRuntime, AsyncValue, AsyncVariable, spawn_worker_thread, AsyncPipelineResult, register_global_panic_handler,
+               rt::{TaskId, AsyncTask, AsyncRuntimeBuilder, AsyncRuntime, AsyncValue, AsyncVariable, spawn_worker_thread, AsyncPipelineResult, register_global_panic_handler, replace_global_alloc_error_handler,
                     single_thread::{SingleTaskRuntime, SingleTaskRunner},
                     multi_thread::{MultiTaskRuntime, MultiTaskRuntimeBuilder},
                     worker_thread::WorkerTaskRunner,
@@ -5447,6 +5447,20 @@ fn test_panic_handler() {
     });
 
     thread::sleep(Duration::from_millis(10000));
+}
+
+#[test]
+fn test_global_alloc_error_handler() {
+    replace_global_alloc_error_handler();
+
+    thread::Builder::new()
+        .name("Test-Error-Handler".to_string())
+        .spawn(move || {
+        let mut vec = Vec::with_capacity(16 * 1024 * 1024 * 1024);
+        vec.resize(16 * 1024 * 1024 * 1024, "Hello World!");
+    });
+
+    thread::sleep(Duration::from_millis(1000000000));
 }
 
 #[test]
