@@ -16,10 +16,12 @@ use std::panic::{PanicInfo, set_hook};
 use std::task::{Waker, Context, Poll};
 use std::io::{Error, Result, ErrorKind};
 use std::alloc::{Layout, set_alloc_error_hook};
-use std::time::{Instant, Duration, SystemTime};
+use std::time::{Duration, SystemTime};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, AtomicIsize, AtomicPtr, Ordering};
+#[cfg(target_arch = "wasm32")]
+use std::time::Instant;
 
 use futures::stream::{Stream, BoxStream};
 
@@ -36,6 +38,8 @@ use crossbeam_queue::ArrayQueue;
 use flume::{Sender as AsyncSender, Receiver as AsyncReceiver, bounded as async_bounded};
 use num_cpus;
 use backtrace::Backtrace;
+#[cfg(not(target_arch = "wasm32"))]
+use minstant::Instant;
 
 use pi_hash::XHashMap;
 use pi_local_timer::local_timer::LocalTimer;
@@ -360,7 +364,10 @@ pub trait AsyncTaskPoolExt<O: Default + 'static = ()>: Send + Sync + 'static {
     /// 获取工作者的数量
     fn worker_len(&self) -> usize {
         //默认工作者数量和本机逻辑核数相同
-        num_cpus::get()
+        #[cfg(not(target_arch = "wasm32"))]
+        return num_cpus::get();
+        #[cfg(target_arch = "wasm32")]
+        return 1;
     }
 
     /// 获取缓冲区的任务数量，缓冲区任务是未分配给工作者的任务
@@ -522,13 +529,13 @@ impl<O: Default + 'static> AsyncRuntimeBuilder<O> {
             sleep_timeout,
             loop_interval,
             move || {
-                let now = minstant::Instant::now();
+                let now = Instant::now();
                 match runner_copy.run_once() {
                     Err(e) => {
                         panic!("Run runner failed, reason: {:?}", e);
                     },
                     Ok(len) => {
-                        (len == 0, minstant::Instant::now().duration_since(now))
+                        (len == 0, Instant::now().duration_since(now))
                     },
                 }
             },
@@ -1152,7 +1159,7 @@ pub struct AsyncTaskTimer<
     producor:   Sender<(usize, AsyncTimingTask<P, O>)>,                             //定时任务生产者
     consumer:   Receiver<(usize, AsyncTimingTask<P, O>)>,                           //定时任务消费者
     timer:      Arc<RefCell<LocalTimer<AsyncTimingTask<P, O>, 1000, 60, 60, 24>>>,  //定时器
-    now:        minstant::Instant,                                                  //当前时间
+    now:        Instant,                                                            //当前时间
 }
 
 unsafe impl<
@@ -1171,7 +1178,7 @@ impl<
     /// 构建异步任务本地定时器
     pub fn new() -> Self {
         let (producor, consumer) = unbounded();
-        let now = minstant::Instant::now();
+        let now = Instant::now();
 
         AsyncTaskTimer {
             producor,
@@ -1184,7 +1191,7 @@ impl<
     /// 构建指定间隔的异步任务本地定时器
     pub fn with_interval(time: usize) -> Self {
         let (producor, consumer) = unbounded();
-        let now = minstant::Instant::now();
+        let now = Instant::now();
 
         AsyncTaskTimer {
             producor,
@@ -1807,7 +1814,7 @@ fn global_alloc_error_handle(layout: Layout) {
 ///单调递增时间
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MontonicTime {
-    Normal(Instant),    //标准单调递增时间
+    Normal(std::time::Instant),    //标准单调递增时间
     Fast((i64, i64)),   //快速单调递增时间，只支持类Linux系统
 }
 
@@ -1818,7 +1825,7 @@ impl MontonicTime {
     /// 构建一个单调递增时间
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     pub fn now() -> Self {
-        MontonicTime::Normal(Instant::now())
+        MontonicTime::Normal(std::time::Instant::now())
     }
 
     /// 构建一个单调递增时间

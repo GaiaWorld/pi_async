@@ -5,14 +5,16 @@ use std::any::Any;
 use std::vec::IntoIter;
 use std::future::Future;
 use std::mem::transmute;
+use std::time::Duration;
 use std::cell::UnsafeCell;
 use std::sync::{Arc, Weak};
 use std::marker::PhantomData;
 use std::thread::{self, Builder};
 use std::task::{Waker, Context, Poll};
 use std::io::{Error, Result, ErrorKind};
-use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicPtr, Ordering};
+#[cfg(target_arch = "wasm32")]
+use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock, Condvar};
 use crossbeam_channel::{Sender, bounded, unbounded};
@@ -24,7 +26,8 @@ use futures::{future::{FutureExt, BoxFuture},
               task::{ArcWake, waker_ref}, TryFuture};
 use async_stream::stream;
 use num_cpus;
-use minstant;
+#[cfg(not(target_arch = "wasm32"))]
+use minstant::Instant;
 use log::{debug, warn};
 
 use super::{PI_ASYNC_LOCAL_THREAD_ASYNC_RUNTIME,
@@ -48,7 +51,10 @@ use super::{PI_ASYNC_LOCAL_THREAD_ASYNC_RUNTIME,
 /*
 * 默认的初始工作者数量
 */
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_INIT_WORKER_SIZE: usize = 2;
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_INIT_WORKER_SIZE: usize = 1;
 
 /*
 * 默认的工作者线程名称前缀
@@ -120,7 +126,10 @@ unsafe impl<O: Default + 'static> Sync for ComputationalTaskPool<O> {}
 
 impl<O: Default + 'static> Default for ComputationalTaskPool<O> {
     fn default() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let core_len = num_cpus::get(); //工作者任务池数据等于本机逻辑核数
+        #[cfg(target_arch = "wasm32")]
+        let core_len = 1; //工作者任务池数据等于1
         ComputationalTaskPool::new(core_len)
     }
 }
@@ -564,7 +573,10 @@ impl<O: Default + 'static> AsyncTaskPoolExt<O> for StealableTaskPool<O> {
 impl<O: Default + 'static> StealableTaskPool<O> {
     /// 构建可窃取的多线程任务池
     pub fn new() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let size = num_cpus::get() * 2; //默认最大工作者任务池数量是当前cpu逻辑核的2倍
+        #[cfg(target_arch = "wasm32")]
+        let size = 1; //默认最大工作者任务池数量是1
         StealableTaskPool::with(DEFAULT_INIT_WORKER_SIZE, size)
     }
 
@@ -1120,7 +1132,10 @@ unsafe impl<
 impl<O: Default + 'static> Default for MultiTaskRuntimeBuilder<O> {
     //默认构建可窃取可伸缩的多线程运行时
     fn default() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let core_len = num_cpus::get(); //默认的工作者的数量为本机逻辑核数
+        #[cfg(target_arch = "wasm32")]
+        let core_len = 1; //默认的工作者的数量为1
         let pool = StealableTaskPool::with(core_len, core_len);
         MultiTaskRuntimeBuilder::new(pool)
             .thread_stack_size(2 * 1024 * 1024)
@@ -1134,7 +1149,10 @@ impl<
 > MultiTaskRuntimeBuilder<O, P> {
     /// 构建指定任务池、线程名前缀、初始线程数量、最少线程数量、最大线程数量、线程栈大小、线程空闲时最长休眠时间和是否使用本地定时器的多线程任务池
     pub fn new(mut pool: P) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let core_len = num_cpus::get(); //获取本机cpu逻辑核数
+        #[cfg(target_arch = "wasm32")]
+        let core_len = 1; //默认为1
 
         MultiTaskRuntimeBuilder {
             pool,
@@ -1350,7 +1368,7 @@ fn timer_work_loop<
     let mut sleep_count = 0; //连续休眠计数器
     loop {
         //设置新的定时异步任务，并唤醒已到期的定时异步任务
-        let mut timer_run_millis = minstant::Instant::now(); //重置定时器运行时长
+        let mut timer_run_millis = Instant::now(); //重置定时器运行时长
         timer.lock().consume(); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
         loop {
             let current_time = timer.lock().is_require_pop(); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
@@ -1418,7 +1436,7 @@ fn timer_work_loop<
                     is_sleep.store(true, Ordering::SeqCst);
 
                     //获取休眠的实际时长
-                    let diff_time =  minstant::Instant::now()
+                    let diff_time =  Instant::now()
                         .duration_since(timer_run_millis)
                         .as_millis() as u64; //获取定时器运行时长
                     let real_timeout = if timer.lock().len() == 0 {
