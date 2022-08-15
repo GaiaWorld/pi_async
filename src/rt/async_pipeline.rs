@@ -23,7 +23,12 @@ pub type BoxSender<'a, T, E = Error> = Pin<Box<dyn AsyncSender<T, E> + Send + 'a
 ///
 /// 异步发送器
 ///
-pub trait AsyncSender<T, Err = Error>: Sink<T, Error = Err> {}
+pub trait AsyncSender<T, Err = Error>: Sink<T, Error = Err> {
+    /// 获取已发送未接收的队列长度
+    fn current_len(&self) -> Option<usize> {
+        None
+    }
+}
 
 ///
 /// 扩展的异步发送器
@@ -228,7 +233,11 @@ impl<T> Sink<T> for PipeSender<T> {
     }
 }
 
-impl<T> AsyncSender<T> for PipeSender<T> {}
+impl<T> AsyncSender<T> for PipeSender<T> {
+    fn current_len(&self) -> Option<usize> {
+        Some(self.queue.len())
+    }
+}
 
 ///
 /// 允许跨线程的动态异步接收器
@@ -239,7 +248,12 @@ pub type BoxReceiver<'a, T> = Pin<Box<dyn AsyncReceiver<T> + Send + 'a, Global>>
 ///
 /// 异步接收器
 ///
-pub trait AsyncReceiver<T>: Stream<Item = T> + FusedStream {}
+pub trait AsyncReceiver<T>: Stream<Item = T> + FusedStream {
+    /// 获取已发送未接收的队列长度
+    fn current_len(&self) -> Option<usize> {
+        None
+    }
+}
 
 ///
 /// 扩展的异步接收器
@@ -331,7 +345,11 @@ impl<T> FusedStream for PipeReceiver<T> {
     }
 }
 
-impl<T> AsyncReceiver<T> for PipeReceiver<T> {}
+impl<T> AsyncReceiver<T> for PipeReceiver<T> {
+    fn current_len(&self) -> Option<usize> {
+        Some(self.queue.len())
+    }
+}
 
 ///
 /// 创建一对指定容量的异步通道
