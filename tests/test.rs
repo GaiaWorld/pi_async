@@ -37,8 +37,7 @@ use tokio::runtime::Builder as TokioRtBuilder;
 use async_stream::stream;
 use flume::{Sender as AsyncSender, Receiver as AsyncReceiver, bounded as async_bounded};
 
-use pi_async::{AsyncExecutorResult, AsyncExecutor, AsyncSpawner,
-               lock::{mpmc_deque::MpmcDeque,
+use pi_async::{lock::{mpmc_deque::MpmcDeque,
                       mpsc_deque::mpsc_deque,
                       spin_lock::SpinLock,
                       mutex_lock::Mutex,
