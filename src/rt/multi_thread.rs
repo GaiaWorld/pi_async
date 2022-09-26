@@ -26,9 +26,8 @@ use futures::{future::{FutureExt, BoxFuture},
               task::{ArcWake, waker_ref}, TryFuture};
 use async_stream::stream;
 use num_cpus;
-#[cfg(not(target_arch = "wasm32"))]
-use minstant::Instant;
 use log::{debug, warn};
+use pi_time::Instant;
 
 use super::{PI_ASYNC_LOCAL_THREAD_ASYNC_RUNTIME,
             AsyncTaskPool,

@@ -1,6 +1,6 @@
 [package]
 name = "pi_async"
-version = "0.5.3"
+version = "0.5.4"
 authors = ["vmos <vmos@fairblock.io>"]
 edition = "2018"
 description = "Based on future (MVP), a universal asynchronous runtime and tool used to provide a foundation for the outside world"
@@ -25,6 +25,7 @@ backtrace = "0.3"
 log = "0.4"
 pi_hash = "0.1"
 pi_local_timer = "0.1"
+pi_time = "0.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 minstant = "0.1"

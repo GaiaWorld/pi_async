@@ -20,8 +20,6 @@ use std::time::{Duration, SystemTime};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, AtomicIsize, AtomicPtr, Ordering};
-#[cfg(target_arch = "wasm32")]
-use std::time::Instant;
 
 pub mod single_thread;
 pub mod multi_thread;
@@ -42,8 +40,7 @@ use crossbeam_queue::ArrayQueue;
 use flume::{Sender as AsyncSender, Receiver as AsyncReceiver, bounded as async_bounded};
 use num_cpus;
 use backtrace::Backtrace;
-#[cfg(not(target_arch = "wasm32"))]
-use minstant::Instant;
+use pi_time::Instant;
 
 use pi_hash::XHashMap;
 use pi_local_timer::local_timer::LocalTimer;

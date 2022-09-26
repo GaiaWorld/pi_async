@@ -11,8 +11,6 @@ use std::cell::{RefCell, UnsafeCell};
 use std::task::{Poll, Waker, Context};
 use std::io::{Error, Result, ErrorKind};
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering}};
-#[cfg(target_arch = "wasm32")]
-use std::time::Instant;
 
 use futures::{future::{FutureExt, LocalBoxFuture},
               stream::{Stream, StreamExt, LocalBoxStream},
@@ -22,8 +20,7 @@ use crossbeam_queue::ArrayQueue;
 use crossbeam_channel::{Sender, Receiver, unbounded};
 use flume::{Sender as AsyncSender, Receiver as AsyncReceiver, bounded as async_bounded};
 use num_cpus;
-#[cfg(not(target_arch = "wasm32"))]
-use minstant::Instant;
+use pi_time::Instant;
 
 use pi_hash::XHashMap;
 use pi_local_timer::local_timer::LocalTimer;
