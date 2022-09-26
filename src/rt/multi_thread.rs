@@ -695,7 +695,7 @@ impl<
         where F: Future<Output = O> + Send + 'static {
         let task = Arc::new(AsyncTask::new(task_id,
                                            (self.0).1.clone(),
-                                           Some(Box::new(future).boxed())));
+                                           Some(future.boxed())));
         let result = (self.0).1.push(task);
 
         if let Some(worker_waker) = (self.0).4.pop() {
@@ -754,7 +754,7 @@ impl<
                 .lock()
                 .set_timer(AsyncTimingTask::WaitRun(Arc::new(AsyncTask::new(task_id,
                                                                             (self.0).1.clone(),
-                                                                            Some(Box::new(future).boxed())))),
+                                                                            Some(future.boxed())))),
                            time); //为定时器设置定时异步任务
 
             return Ok(());
@@ -834,11 +834,10 @@ impl<
             }) {
                 Err(_) => panic!("Multi thread runtime timeout failed, reason: local thread id not match"),
                 Ok((producor, _)) => {
-                    async move {
-                        AsyncWaitTimeout::new(rt,
-                                              producor,
-                                              timeout).await;
-                    }.boxed()
+                    AsyncWaitTimeout::new(rt,
+                                          producor,
+                                          timeout)
+                        .boxed()
                 },
             }
         } else {
@@ -888,11 +887,10 @@ impl<
                                 context: C) -> Result<()>
         where F: Future<Output = O> + Send + 'static,
               C: 'static {
-        let boxed = Box::new(future).boxed();
         let task = Arc::new(AsyncTask::with_context(
             task_id,
             (self.0).1.clone(),
-            Some(boxed),
+            Some(future.boxed()),
             context));
         let result = (self.0).1.push(task);
 
@@ -952,12 +950,11 @@ impl<
         if let Some(timers) = &(self.0).2 {
             let mut index: usize = (self.0).3.fetch_add(1, Ordering::Relaxed) % timers.len(); //随机选择一个线程的队列和定时器
             let (_, timer) = &timers[index];
-            let boxed = Box::new(future).boxed();
             timer
                 .lock()
                 .set_timer(AsyncTimingTask::WaitRun(Arc::new(AsyncTask::with_context(task_id,
                                                                                      (self.0).1.clone(),
-                                                                                     Some(boxed),
+                                                                                     Some(future.boxed()),
                                                                                      context))),
                            time); //为定时器设置定时异步任务
 

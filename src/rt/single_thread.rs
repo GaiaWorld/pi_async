@@ -216,10 +216,9 @@ impl<
     /// 派发一个指定的异步任务到异步运行时
     fn spawn<F>(&self, task_id: TaskId, future: F) -> Result<()>
         where F: Future<Output = O> + Send + 'static {
-        let boxed = Box::new(future).boxed();
         if let Err(e) = (self.0)
             .1
-            .push(Arc::new(AsyncTask::new(task_id, (self.0).1.clone(), Some(boxed)))) {
+            .push(Arc::new(AsyncTask::new(task_id, (self.0).1.clone(), Some(future.boxed())))) {
             return Err(Error::new(ErrorKind::Other, e));
         }
 
@@ -229,8 +228,7 @@ impl<
     /// 派发一个在指定时间后执行的异步任务到异步运行时，时间单位ms
     fn spawn_timing<F>(&self, task_id: TaskId, future: F, time: usize) -> Result<()>
         where F: Future<Output = O> + Send + 'static {
-        let boxed = Box::new(future).boxed();
-        (self.0).3.lock().set_timer(AsyncTimingTask::WaitRun(Arc::new(AsyncTask::new(task_id.clone(), (self.0).1.clone(), Some(boxed)))), time);
+        (self.0).3.lock().set_timer(AsyncTimingTask::WaitRun(Arc::new(AsyncTask::new(task_id.clone(), (self.0).1.clone(), Some(future.boxed())))), time);
 
         Ok(())
     }
@@ -298,11 +296,10 @@ impl<
         let rt = self.clone();
         let producor = (self.0).2.clone();
 
-        async move {
-            AsyncWaitTimeout::new(rt,
-                                  producor,
-                                  timeout).await
-        }.boxed()
+        AsyncWaitTimeout::new(rt,
+                              producor,
+                              timeout)
+            .boxed()
     }
 
     /// 生成一个异步管道，输入指定流，输入流的每个值通过过滤器生成输出流的值
@@ -344,12 +341,11 @@ impl<
                                 context: C) -> Result<()>
         where F: Future<Output = O> + Send + 'static,
               C: 'static {
-        let boxed = Box::new(future).boxed();
         if let Err(e) = (self.0)
             .1
             .push(Arc::new(AsyncTask::with_context(task_id,
                                                    (self.0).1.clone(),
-                                                   Some(boxed),
+                                                   Some(future.boxed()),
                                                    context))) {
             return Err(Error::new(ErrorKind::Other, e));
         }
@@ -364,13 +360,12 @@ impl<
                                        time: usize) -> Result<()>
         where F: Future<Output = O> + Send + 'static,
               C: 'static {
-        let boxed = Box::new(future).boxed();
         (self.0)
             .3
             .lock()
             .set_timer(AsyncTimingTask::WaitRun(Arc::new(AsyncTask::with_context(task_id.clone(),
                                                                                  (self.0).1.clone(),
-                                                                                 Some(boxed),
+                                                                                 Some(future.boxed()),
                                                                                  context))), time);
 
         Ok(())

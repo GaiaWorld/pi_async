@@ -31,9 +31,9 @@ use pi_local_timer::local_timer::LocalTimer;
 use crate::{lock::{spin,
                    spin_lock::SpinLock},
             rt::{PI_ASYNC_LOCAL_THREAD_ASYNC_RUNTIME, TaskId, AsyncPipelineResult,
+                 serial_local_thread::{LocalTaskRunner, LocalTaskRuntime},
                  serial_single_thread::{SingleTaskPool, SingleTaskRunner, SingleTaskRuntime},
                  serial_worker_thread::{WorkerTaskRunner, WorkerRuntime}}};
-
 
 ///
 /// 顺序执行的异步任务
@@ -259,7 +259,7 @@ impl<
 ///
 /// 异步任务池
 ///
-pub trait AsyncTaskPool<O: Default + 'static = ()>: Default + Send + Sync + 'static {
+pub trait AsyncTaskPool<O: Default + 'static = ()>: Default + 'static {
     type Pool: AsyncTaskPoolExt<O> + AsyncTaskPool<O>;
 
     /// 获取绑定的线程唯一id
@@ -290,7 +290,7 @@ pub trait AsyncTaskPool<O: Default + 'static = ()>: Default + Send + Sync + 'sta
 ///
 /// 异步任务池扩展
 ///
-pub trait AsyncTaskPoolExt<O: Default + 'static = ()>: Send + Sync + 'static {
+pub trait AsyncTaskPoolExt<O: Default + 'static = ()>: 'static {
     /// 设置待唤醒的工作者唤醒器队列
     fn set_waits(&mut self,
                  _waits: Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>) {}
@@ -440,6 +440,27 @@ pub trait AsyncRuntimeExt<O: Default + 'static = ()> {
 pub struct AsyncRuntimeBuilder<O: Default + 'static = ()>(PhantomData<O>);
 
 impl<O: Default + 'static> AsyncRuntimeBuilder<O> {
+    /// 构建默认的本地异步任务运行时
+    pub fn default_local_thread(name: Option<&str>,
+                                stack_size: Option<usize>) -> LocalTaskRuntime<O> {
+        let runner = LocalTaskRunner::new();
+
+        let thread_name = if let Some(name) = name {
+            name
+        } else {
+            //默认的线程名称
+            "Default-Local-RT"
+        };
+        let thread_stack_size = if let Some(size) = stack_size {
+            size
+        } else {
+            //默认的线程堆栈大小
+            2 * 1024 * 1024
+        };
+
+        runner.startup(thread_name, thread_stack_size)
+    }
+
     /// 构建默认的工作者异步运行时
     pub fn default_worker_thread(worker_name: Option<&str>,
                                  worker_stack_size: Option<usize>,

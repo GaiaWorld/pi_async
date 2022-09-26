@@ -28,6 +28,7 @@ pub mod multi_thread;
 pub mod worker_thread;
 pub mod async_pipeline;
 pub mod serial;
+pub mod serial_local_thread;
 pub mod serial_single_thread;
 pub mod serial_worker_thread;
 

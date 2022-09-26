@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, A
 use futures::{pin_mut,
               stream::{Stream, StreamExt, BoxStream},
               sink::{Sink, SinkExt},
-              future::{FutureExt, BoxFuture},
+              future::{FutureExt, BoxFuture, LocalBoxFuture},
               task::{SpawnExt, ArcWake, waker_ref},
               lock::Mutex as FuturesMutex, executor::LocalPool};
 use parking_lot::{Mutex as ParkingLotMutex, Condvar};
@@ -46,8 +46,9 @@ use pi_async::{lock::{mpmc_deque::MpmcDeque,
                     single_thread::{SingleTaskRuntime, SingleTaskRunner},
                     multi_thread::{MultiTaskRuntime, MultiTaskRuntimeBuilder},
                     worker_thread::WorkerTaskRunner,
-                    async_pipeline::{AsyncSender as PipeLineSender, AsyncSenderExt, AsyncReceiver as PipeLineReceiver, AsyncReceiverExt, AsyncPipeLine, AsyncPipeLineExt, channel, pipeline}},
-               local_queue::{LocalQueueSpawner, LocalQueue}, task::LocalTask};
+                    async_pipeline::{AsyncSender as PipeLineSender, AsyncSenderExt, AsyncReceiver as PipeLineReceiver, AsyncReceiverExt, AsyncPipeLine, AsyncPipeLineExt, channel, pipeline},
+                    serial::AsyncRuntimeBuilder as SerailAsyncRuntimeBuilder,
+                    serial_local_thread::{LocalTaskRunner, LocalTaskRuntime}}};
 
 #[test]
 fn test_other_rt() {
@@ -1052,40 +1053,6 @@ impl Future for TestFuture {
 impl TestFuture {
     pub fn new(handle: Rc<RefCell<HashMap<usize, Waker>>>, index: usize) -> Self {
         TestFuture(index, Rc::downgrade(&handle))
-    }
-}
-
-#[test]
-fn test_async_task() {
-    let handle = Rc::new(RefCell::new(HashMap::new()));
-    let mut queue = LocalQueue::with_capacity(10);
-    let spawner = Rc::new(queue.get_spawner());
-
-    for index in 0..100 {
-        let future = TestFuture::new(handle.clone(), index); //handle是Rc，不允许跨线程，需要在外部用TestFuture封装后再move到async block中，否则handle将无法move到async block中
-        if let Err(e) = spawner.spawn(LocalTask::new(spawner.clone(), async move {
-            println!("!!!!!!async task start, index: {}", index);
-            let r = future.await;
-            println!("!!!!!!async task finish, index: {}, r: {:?}", index, r);
-        })) {
-            println!("!!!> spawn task failed, index: {}, reason: {:?}", index, e);
-        }
-
-        queue.run_once();
-    }
-
-    let keys = &mut handle.borrow().keys().map(|key| {
-        key.clone()
-    }).collect::<Vec<usize>>()[..];
-    keys.sort();
-    keys.reverse();
-    for key in keys {
-        //唤醒中止任务
-        if let Some(waker) = handle.borrow_mut().remove(key) {
-            waker.wake();
-        }
-
-        queue.run_once();
     }
 }
 
@@ -3261,12 +3228,85 @@ impl Drop for AtomicCounter {
 }
 
 #[test]
+fn test_empty_local_task() {
+    let rt = SerailAsyncRuntimeBuilder::default_local_thread(None, None);
+    let rt_copy = rt.clone();
+
+    rt.send(async move {
+        let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+        let start = Instant::now();
+        for _ in 0..10000000 {
+            let counter_copy = counter.clone();
+            rt_copy.spawn(async move {
+                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+            });
+        }
+        println!("!!!!!!spawn local task ok, time: {:?}", Instant::now() - start);
+    });
+
+    thread::sleep(Duration::from_millis(10000));
+    rt.close();
+    thread::sleep(Duration::from_millis(1000));
+
+    let rt = SerailAsyncRuntimeBuilder::default_local_thread(None, None);
+    let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+    let start = Instant::now();
+    rt.send(loop_local_task(rt.clone(), counter, 0, start));
+
+    thread::sleep(Duration::from_millis(10000));
+    rt.close();
+    thread::sleep(Duration::from_millis(1000));
+
+    let runner = LocalTaskRunner::new();
+    let rt = runner.get_runtime();
+
+    thread::spawn(move || {
+        {
+            let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+            let start = Instant::now();
+            for _ in 0..10000000 {
+                let counter_copy = counter.clone();
+                rt.spawn(async move {
+                    counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                });
+                rt.wakeup_once();
+                runner.run_once();
+            }
+            println!("!!!!!!spawn local task ok, time: {:?}", Instant::now() - start);
+        }
+    });
+
+    thread::sleep(Duration::from_millis(100000000));
+}
+
+fn loop_local_task(rt: LocalTaskRuntime<()>,
+                   counter: Arc<AtomicCounter>,
+                   count: usize,
+                   time: Instant) -> LocalBoxFuture<'static, ()> {
+    if count >= 10000000 {
+        println!("!!!!!!spawn local task ok, time: {:?}", Instant::now() - time);
+        return async move {}.boxed_local();
+    }
+
+    let counter_copy = counter.clone();
+    rt.spawn(async move {
+        counter_copy.0.fetch_add(1, Ordering::Relaxed);
+    });
+
+    async move {
+        rt.spawn(loop_local_task(rt.clone(), counter, count + 1, time));
+    }.boxed_local()
+}
+
+#[test]
 fn test_empty_single_task() {
     let runner = SingleTaskRunner::default();
     let rt = runner.startup().unwrap();
 
+    let status = Arc::new(AtomicBool::new(true));
+    let status_copy = status.clone();
     thread::spawn(move || {
-        loop {
+        while status_copy.load(Ordering::Relaxed) {
             if let Err(e) = runner.run() {
                 println!("!!!!!!run failed, reason: {:?}", e);
                 break;
@@ -3289,6 +3329,30 @@ fn test_empty_single_task() {
         }
         println!("!!!!!!spawn single timing task ok, time: {:?}", Instant::now() - start);
     }
+
+    thread::sleep(Duration::from_millis(10000));
+    status.store(false, Ordering::Relaxed);
+    thread::sleep(Duration::from_millis(1000));
+
+    let runner = SingleTaskRunner::default();
+    let rt = runner.startup().unwrap();
+
+    thread::spawn(move || {
+        {
+            let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+            let start = Instant::now();
+            for _ in 0..10000000 {
+                let counter_copy = counter.clone();
+                if let Err(e) = rt.spawn(rt.alloc(), async move {
+                    counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                }) {
+                    println!("!!!> spawn empty singale task failed, reason: {:?}", e);
+                }
+                runner.run_once();
+            }
+            println!("!!!!!!spawn single timing task ok, time: {:?}", Instant::now() - start);
+        }
+    });
 
     thread::sleep(Duration::from_millis(100000000));
 }

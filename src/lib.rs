@@ -5,6 +5,8 @@
 #![feature(panic_info_message)]
 #![feature(allocator_api)]
 #![feature(alloc_error_hook)]
+#![feature(thread_id_value)]
+#![feature(negative_impls)]
 
 pub mod prelude;
 pub mod lock;
