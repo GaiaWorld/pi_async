@@ -13,8 +13,6 @@ use std::thread::{self, Builder};
 use std::task::{Waker, Context, Poll};
 use std::io::{Error, Result, ErrorKind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicPtr, Ordering};
-#[cfg(target_arch = "wasm32")]
-use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock, Condvar};
 use crossbeam_channel::{Sender, bounded, unbounded};
