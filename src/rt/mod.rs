@@ -40,10 +40,11 @@ use crossbeam_queue::ArrayQueue;
 use flume::{Sender as AsyncSender, Receiver as AsyncReceiver, bounded as async_bounded};
 use num_cpus;
 use backtrace::Backtrace;
-use pi_time::Instant;
+use slotmap::{Key, KeyData};
 
+use pi_time::Instant;
 use pi_hash::XHashMap;
-use pi_local_timer::local_timer::LocalTimer;
+use pi_cancel_timer::Timer;
 
 use single_thread::{SingleTaskPool, SingleTaskRunner, SingleTaskRuntime};
 use multi_thread::{StealableTaskPool, MultiTaskRuntimeBuilder, MultiTaskRuntime};
@@ -1157,10 +1158,10 @@ pub struct AsyncTaskTimer<
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
     O: Default + 'static = (),
 > {
-    producor:   Sender<(usize, AsyncTimingTask<P, O>)>,                             //定时任务生产者
-    consumer:   Receiver<(usize, AsyncTimingTask<P, O>)>,                           //定时任务消费者
-    timer:      Arc<RefCell<LocalTimer<AsyncTimingTask<P, O>, 1000, 60, 60, 24>>>,  //定时器
-    now:        Instant,                                                            //当前时间
+    producor:   Sender<(usize, AsyncTimingTask<P, O>)>,                     //定时任务生产者
+    consumer:   Receiver<(usize, AsyncTimingTask<P, O>)>,                   //定时任务消费者
+    timer:      Arc<RefCell<Timer<AsyncTimingTask<P, O>, 1000, 60, 3>>>,    //定时器
+    now:        Instant,                                                    //当前时间
 }
 
 unsafe impl<
@@ -1184,20 +1185,7 @@ impl<
         AsyncTaskTimer {
             producor,
             consumer,
-            timer: Arc::new(RefCell::new(LocalTimer::<AsyncTimingTask<P, O>, 1000, 60, 60, 24>::new(1, now.elapsed().as_millis() as u64))),
-            now,
-        }
-    }
-
-    /// 构建指定间隔的异步任务本地定时器
-    pub fn with_interval(time: usize) -> Self {
-        let (producor, consumer) = unbounded();
-        let now = Instant::now();
-
-        AsyncTaskTimer {
-            producor,
-            consumer,
-            timer: Arc::new(RefCell::new(LocalTimer::<AsyncTimingTask<P, O>, 1000, 60, 60, 24>::new(time as u64, now.elapsed().as_millis() as u64))),
+            timer: Arc::new(RefCell::new(Timer::<AsyncTimingTask<P, O>, 1000, 60, 3>::default())),
             now,
         }
     }
@@ -1211,18 +1199,27 @@ impl<
     /// 获取剩余未到期的定时器任务数量
     #[inline]
     pub fn len(&self) -> usize {
-        self.timer.as_ref().borrow().len()
+        let timer = self.timer.as_ref().borrow();
+        timer.add_count() - timer.remove_count()
     }
 
     /// 设置定时器
     pub fn set_timer(&self, task: AsyncTimingTask<P, O>, timeout: usize) -> usize {
-        self.timer.borrow_mut().insert(task, timeout as u64)
+        self
+            .timer
+            .borrow_mut()
+            .push(timeout, task)
+            .data()
+            .as_ffi() as usize
     }
 
     /// 取消定时器
     pub fn cancel_timer(&self, timer_ref: usize) -> Option<AsyncTimingTask<P, O>> {
-        if let Some(item) = self.timer.borrow_mut().try_remove(timer_ref) {
-            Some(item.elem)
+        if let Some(item) = self
+            .timer
+            .borrow_mut()
+            .cancel(KeyData::from_ffi(timer_ref as u64).into()) {
+            Some(item)
         } else {
             None
         }
@@ -1243,7 +1240,7 @@ impl<
     /// 判断当前时间是否有可以弹出的任务，如果有可以弹出的任务，则返回当前时间，否则返回空
     pub fn is_require_pop(&self) -> Option<u64> {
         let current_time = self.now.elapsed().as_millis() as u64;
-        if self.timer.borrow().check_sleep(current_time) == 0 {
+        if self.timer.borrow_mut().is_ok(current_time) {
             Some(current_time)
         } else {
             None
@@ -1252,16 +1249,11 @@ impl<
 
     /// 从定时器中弹出指定时间的一个到期任务
     pub fn pop(&self, current_time: u64) -> Option<(usize, AsyncTimingTask<P, O>)> {
-        if let Some((item, index)) = self.timer.borrow_mut().pop(current_time) {
-            Some((index, item.elem))
+        if let Some((key, item)) = self.timer.borrow_mut().pop_kv(current_time) {
+            Some((key.data().as_ffi() as usize, item))
         } else {
             None
         }
-    }
-
-    /// 清空定时器
-    pub fn clear(&self) {
-        self.timer.borrow_mut().clear();
     }
 }
 
