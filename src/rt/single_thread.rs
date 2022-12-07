@@ -20,8 +20,9 @@ use futures::{future::{FutureExt, BoxFuture},
               task::{ArcWake, waker_ref}};
 use async_stream::stream;
 
-use crate::{lock::mpsc_deque::{Sender as MpscSent, Receiver as MpscRecv, mpsc_deque},
-            rt::{AsyncWaitResult, AsyncTimingTask}};
+use crate::{lock::{spin,
+                   mpsc_deque::{Sender as MpscSent, Receiver as MpscRecv, mpsc_deque}},
+            rt::{AsyncWaitResult, AsyncTimingTask, bind_local_thread}};
 use super::{AsyncTaskPool,
             AsyncTaskPoolExt,
             AsyncRuntime,
@@ -371,19 +372,9 @@ impl<
         Ok(())
     }
 
-    fn block_on<RP, F>(&self, future: F) -> Result<F::Output>
-        where RP: AsyncTaskPoolExt<F::Output> + AsyncTaskPool<F::Output, Pool = RP>,
-              F: Future + Send + 'static,
+    fn block_on<F>(&self, future: F) -> Result<F::Output>
+        where F: Future + Send + 'static,
               <F as Future>::Output: Default + Send + 'static {
-        //从本地线程获取当前异步运行时
-        if let Some(local_rt) = local_async_runtime::<F::Output>() {
-            //本地线程绑定了异步运行时
-            if local_rt.get_id() == self.get_id() {
-                //如果是相同运行时，则立即返回错误
-                return Err(Error::new(ErrorKind::WouldBlock, format!("Block on failed, reason: would block")));
-            }
-        }
-
         let (sender, receiver) = bounded(1);
         if let Err(e) = self.spawn(self.alloc(), async move {
             //在指定运行时中执行，并返回结果
@@ -395,14 +386,64 @@ impl<
             return Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)));
         }
 
-        //同步阻塞等待异步任务返回
-        match receiver.recv() {
-            Err(e) => {
-                Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)))
-            },
-            Ok(result) => {
-                Ok(result)
-            },
+        let mut count = 0;
+        let mut spin_len = 1;
+        loop {
+            count += 1;
+            if count > 3 {
+                //当前异步任务执行时间过长，则自旋后继续等待
+                spin_len = spin(spin_len);
+            }
+
+            //在本地线程中推动当前运行时执行，设置新的定时任务，并唤醒已过期的定时任务
+            (self.0).3.lock().consume(); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
+            loop {
+                let current_time = (self.0).3.lock().is_require_pop(); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
+                if let Some(current_time) = current_time {
+                    //当前有到期的定时异步任务，则只处理到期的一个定时异步任务
+                    let timed_out = (self.0).3.lock().pop(current_time); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
+                    if let Some((handle, timing_task)) = timed_out {
+                        match timing_task {
+                            AsyncTimingTask::Pended(expired) => {
+                                //唤醒休眠的异步任务，并立即执行
+                                self.wakeup(&expired);
+                                if let Some(task) = (self.0).1.try_pop() {
+                                    run_task(task);
+                                }
+                            },
+                            AsyncTimingTask::WaitRun(expired) => {
+                                //立即执行到期的定时异步任务，并立即执行
+                                (self.0).1.push_timed_out(handle as u64, expired);
+                                if let Some(task) = (self.0).1.try_pop() {
+                                    run_task(task);
+                                }
+                            },
+                        }
+                    }
+                } else {
+                    //当前没有到期的定时异步任务，则退出本次定时异步任务处理
+                    break;
+                }
+            }
+
+            //继续执行当前任务池中的一个异步任务
+            if let Some(task) = (self.0).1.try_pop() {
+                run_task(task);
+            }
+
+            //尝试获取异步任务的执行结果
+            match receiver.try_recv() {
+                Err(e) => {
+                    if e.is_disconnected() {
+                        //通道已关闭，则立即返回错误原因
+                        return Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)));
+                    }
+                },
+                Ok(result) => {
+                    //异步任务已完成，则立即返回执行结果
+                    return Ok(result)
+                },
+            }
         }
     }
 }
@@ -688,6 +729,11 @@ impl<
             }
         }
     }
+
+    /// 转换为本地异步单线程任务运行时
+    pub fn into_local(self) -> SingleTaskRuntime<O, P> {
+        self.runtime
+    }
 }
 
 //执行异步任务
@@ -745,8 +791,9 @@ fn test_single_runtime() {
     let rt2 = rt.clone();
     let rt3 = rt.clone();
 
+    let rt_copy = rt.clone();
     thread::spawn(move || {
-        runner.bind_local_thread(None);
+        bind_local_thread(rt_copy.to_local_runtime());
 
         loop {
             if let Err(e) = runner.run() {
@@ -767,7 +814,7 @@ fn test_single_runtime() {
 
     let rt_copy = rt.clone();
     let thread_handle = thread::spawn(move || {
-        match rt_copy.block_on::<SingleTaskPool<String>, _>(async move {
+        match rt_copy.block_on(async move {
             set_local_dict::<usize>(0);
             println!("get local dict, init value: {}", *get_local_dict::<usize>().unwrap());
             *get_local_dict_mut::<usize>().unwrap() = 0xffffffff;
@@ -851,6 +898,37 @@ fn test_single_runtime() {
     });
 
     thread::sleep(Duration::from_millis(1000000000));
+}
+
+#[test]
+pub fn test_single_runtime_block_on() {
+    use std::time::Instant;
+    use std::ops::Drop;
+    use std::sync::atomic::AtomicUsize;
+
+    use crate::rt::AsyncRuntimeExt;
+
+    struct AtomicCounter(AtomicUsize, Instant);
+    impl Drop for AtomicCounter {
+        fn drop(&mut self) {
+            unsafe {
+                println!("!!!!!!drop counter, count: {:?}, time: {:?}", self.0.load(Ordering::Relaxed), Instant::now() - self.1);
+            }
+        }
+    }
+
+    let pool = SingleTaskPool::default();
+    let rt = SingleTaskRunner::<(), SingleTaskPool<()>>::new(pool).into_local();
+
+    let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+    let start = Instant::now();
+    for _ in 0..10000000 {
+        let counter_copy = counter.clone();
+        rt.block_on(async move {
+            counter_copy.0.fetch_add(1, Ordering::Relaxed)
+        });
+    }
+    println!("!!!!!!spawn single task ok, time: {:?}", Instant::now() - start);
 }
 
 

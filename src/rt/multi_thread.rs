@@ -961,9 +961,8 @@ impl<
         Err(Error::new(ErrorKind::Other, format!("Spawn timing task failed, task_id: {:?}, reason: timer not exist", task_id)))
     }
 
-    fn block_on<RP, F>(&self, future: F) -> Result<F::Output>
-        where RP: AsyncTaskPoolExt<F::Output> + AsyncTaskPool<F::Output, Pool = RP>,
-              F: Future + Send + 'static,
+    fn block_on<F>(&self, future: F) -> Result<F::Output>
+        where F: Future + Send + 'static,
               <F as Future>::Output: Default + Send + 'static {
         //从本地线程获取当前异步运行时
         if let Some(local_rt) = local_async_runtime::<F::Output>() {
@@ -1944,7 +1943,7 @@ fn test_computational_runtime() {
 
     let rt_copy = rt.clone();
     let thread_handle = thread::spawn(move || {
-        match rt_copy.block_on::<ComputationalTaskPool<String>, _>(async move {
+        match rt_copy.block_on(async move {
             set_local_dict::<usize>(0);
             println!("get local dict, init value: {}", *get_local_dict::<usize>().unwrap());
             *get_local_dict_mut::<usize>().unwrap() = 0xffffffff;
@@ -2134,7 +2133,7 @@ fn test_stealable_runtime() {
 
     let rt_copy = rt.clone();
     let thread_handle = thread::spawn(move || {
-        match rt_copy.block_on::<StealableTaskPool<String>, _>(async move {
+        match rt_copy.block_on(async move {
             set_local_dict::<usize>(0);
             println!("get local dict, init value: {}", *get_local_dict::<usize>().unwrap());
             *get_local_dict_mut::<usize>().unwrap() = 0xffffffff;

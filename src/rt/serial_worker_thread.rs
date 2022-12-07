@@ -221,11 +221,10 @@ impl<
     }
 
     #[inline]
-    fn block_on<RP, F>(&self, future: F) -> Result<F::Output>
-        where RP: AsyncTaskPoolExt<F::Output> + AsyncTaskPool<F::Output, Pool = RP>,
-              F: Future + 'static,
+    fn block_on<F>(&self, future: F) -> Result<F::Output>
+        where F: Future + 'static,
               <F as Future>::Output: Default + 'static {
-        (self.0).2.block_on::<RP, F>(future)
+        (self.0).2.block_on::<F>(future)
     }
 }
 

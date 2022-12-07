@@ -5,17 +5,20 @@ use std::future::Future;
 use std::cell::UnsafeCell;
 use std::task::{Context, Poll};
 use std::collections::VecDeque;
+use std::io::{Error, Result as IOResult, ErrorKind};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 use futures::{task::{ArcWake, waker_ref},
               future::{FutureExt, LocalBoxFuture},
               stream::{StreamExt, Stream, LocalBoxStream}};
 use async_stream::stream;
+use crossbeam_channel::bounded;
 use crossbeam_queue::SegQueue;
 use flume::bounded as async_bounded;
 
-use crate::rt::{AsyncPipelineResult, alloc_rt_uid,
-                serial::{AsyncWait, AsyncWaitAny, AsyncWaitAnyCallback, AsyncMapReduce}};
+use crate::{lock::spin,
+            rt::{AsyncPipelineResult, alloc_rt_uid,
+                 serial::{AsyncWait, AsyncWaitAny, AsyncWaitAnyCallback, AsyncMapReduce}}};
 
 // 本地异步任务
 pub(crate) struct LocalTask<O: Default + 'static = ()> {
@@ -171,6 +174,58 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
         output.boxed_local()
     }
 
+    fn block_on<F>(&self, future: F) -> IOResult<F::Output>
+        where F: Future + 'static,
+              <F as Future>::Output: Default + 'static {
+        let (sender, receiver) = bounded(1);
+        self.spawn(async move {
+            //在指定运行时中执行，并返回结果
+            let r = future.await;
+            sender.send(r);
+
+            Default::default()
+        });
+        self.wakeup_once();
+
+        let mut count = 0;
+        let mut spin_len = 1;
+        loop {
+            count += 1;
+            if count > 3 {
+                //当前异步任务执行时间过长，则自旋后继续等待
+                spin_len = spin(spin_len);
+            }
+
+            //在本地线程中推动当前运行时执行
+            unsafe {
+                if let Some(task) = (&mut *(self.0).3.get()).pop_front() {
+                    let waker = waker_ref(&task);
+                    let mut context = Context::from_waker(&*waker);
+                    if let Some(mut future) = task.get_inner() {
+                        if let Poll::Pending = future.as_mut().poll(&mut context) {
+                            //当前未准备好，则恢复本地异步任务，以保证本地异步任务不被提前释放
+                            task.set_inner(Some(future));
+                        }
+                    }
+                }
+            }
+
+            //尝试获取异步任务的执行结果
+            match receiver.try_recv() {
+                Err(e) => {
+                    if e.is_disconnected() {
+                        //通道已关闭，则立即返回错误原因
+                        return Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)));
+                    }
+                },
+                Ok(result) => {
+                    //异步任务已完成，则立即返回执行结果
+                    return Ok(result)
+                },
+            }
+        }
+    }
+
     /// 关闭异步运行时，返回请求关闭是否成功
     pub fn close(self) -> bool {
         if cfg!(target_arch = "aarch64") {
@@ -260,4 +315,37 @@ impl<O: Default + 'static> LocalTaskRunner<O> {
             }
         }
     }
+
+    /// 转换为本地异步任务运行时
+    pub fn into_local(self) -> LocalTaskRuntime<O> {
+        self.0
+    }
+}
+
+#[test]
+fn test_local_runtime_block_on() {
+    use std::time::Instant;
+    use std::ops::Drop;
+    use std::sync::atomic::AtomicUsize;
+
+    struct AtomicCounter(AtomicUsize, Instant);
+    impl Drop for AtomicCounter {
+        fn drop(&mut self) {
+            unsafe {
+                println!("!!!!!!drop counter, count: {:?}, time: {:?}", self.0.load(Ordering::Relaxed), Instant::now() - self.1);
+            }
+        }
+    }
+
+    let rt = LocalTaskRunner::<()>::new().into_local();
+
+    let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+    let start = Instant::now();
+    for _ in 0..10000000 {
+        let counter_copy = counter.clone();
+        let _ = rt.block_on(async move {
+            counter_copy.0.fetch_add(1, Ordering::Relaxed)
+        });
+    }
+    println!("!!!!!!spawn local task ok, time: {:?}", Instant::now() - start);
 }

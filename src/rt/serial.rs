@@ -426,9 +426,8 @@ pub trait AsyncRuntimeExt<O: Default + 'static = ()> {
               C: 'static;
 
     /// 立即创建一个指定任务池的异步运行时，并执行指定的异步任务，阻塞当前线程，等待异步任务完成后返回
-    fn block_on<RP, F>(&self, future: F) -> Result<F::Output>
-        where RP: AsyncTaskPoolExt<F::Output> + AsyncTaskPool<F::Output, Pool = RP>,
-              F: Future + 'static,
+    fn block_on<F>(&self, future: F) -> Result<F::Output>
+        where F: Future + 'static,
               <F as Future>::Output: Default + 'static;
 }
 
