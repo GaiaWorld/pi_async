@@ -18,10 +18,11 @@ crossbeam-queue = "0.3"
 flume = "0.10"
 parking_lot = "0.11"
 num_cpus = "1.13"
+slotmap = "1.0"
 log = "0.4"
 minstant = "0.1"
 pi_hash = "0.1"
-pi_local_timer = "0.1"
+pi_cancel_timer = "0.2"
 
 [dev-dependencies]
 rand = "0.7"

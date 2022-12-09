@@ -1213,7 +1213,7 @@ impl<
         for _ in 0..self.max {
             //初始化指定的最大线程数量的本地定时器和定时异步任务生产者，定时器不会在关闭工作者时被移除
             if let Some(vec) = &mut timers {
-                let timer = AsyncTaskTimer::with_interval(interval.unwrap());
+                let timer = AsyncTaskTimer::new();
                 let producor = timer.producor.clone();
                 let timer = Arc::new(Mutex::new(timer));
                 vec.push((producor, timer));
