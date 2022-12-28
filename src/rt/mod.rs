@@ -877,7 +877,7 @@ pub fn clear_local_dict() -> Result<()> {
 }
 
 ///
-/// 异步值，只允许被设置一次值
+/// 同步阻塞的异步值，只允许被同步阻塞的设置一次值
 ///
 pub struct AsyncValue<V: Send + 'static>(Arc<InnerAsyncValue<V>>);
 
@@ -908,7 +908,7 @@ impl<V: Send + 'static> Future for AsyncValue<V> {
 }
 
 /*
-* 异步值同步方法
+* 同步阻塞的异步值同步方法
 */
 impl<V: Send + 'static> AsyncValue<V> {
     /// 构建异步值，默认值为未就绪
@@ -960,8 +960,122 @@ impl<V: Send + 'static> AsyncValue<V> {
     }
 }
 
-// 内部异步值，只允许被设置一次值
+// 同步阻塞的内部异步值，只允许被同步阻塞的设置一次值
 pub struct InnerAsyncValue<V: Send + 'static> {
+    value:  UnsafeCell<Option<V>>,      //值
+    waker:  UnsafeCell<Option<Waker>>,  //唤醒器
+    status: AtomicU8,                   //状态
+}
+
+///
+/// 同步非阻塞的异步值，只允许被同步非阻塞的设置一次值
+///
+pub struct AsyncValueNonBlocking<V: Send + 'static>(Arc<InnerAsyncValueNonBlocking<V>>);
+
+unsafe impl<V: Send + 'static> Send for AsyncValueNonBlocking<V> {}
+unsafe impl<V: Send + 'static> Sync for AsyncValueNonBlocking<V> {}
+
+impl<V: Send + 'static> Clone for AsyncValueNonBlocking<V> {
+    fn clone(&self) -> Self {
+        AsyncValueNonBlocking(self.0.clone())
+    }
+}
+
+impl<V: Send + 'static> Future for AsyncValueNonBlocking<V> {
+    type Output = V;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut spin_len = 1;
+        while self.0.status.load(Ordering::Acquire) == 2 {
+            //还未完成设置值，则自旋等待
+            spin_len = spin(spin_len);
+        }
+
+        if let Some(value) = unsafe { (*(&self).0.value.get()).take() } {
+            //异步值已就绪
+            return Poll::Ready(value);
+        }
+
+        unsafe {
+            *self.0.waker.get() = Some(cx.waker().clone()); //设置异步值的唤醒器
+        }
+        self.0.status.store(1, Ordering::Relaxed); //设置异步值的状态为已就绪
+        Poll::Pending
+    }
+}
+
+/*
+* 同步非阻塞的异步值同步方法
+*/
+impl<V: Send + 'static> AsyncValueNonBlocking<V> {
+    /// 构建异步值，默认值为未就绪
+    pub fn new() -> Self {
+        let inner = InnerAsyncValueNonBlocking {
+            value: UnsafeCell::new(None),
+            waker: UnsafeCell::new(None),
+            status: AtomicU8::new(0),
+        };
+
+        AsyncValueNonBlocking(Arc::new(inner))
+    }
+
+    /// 判断异步值是否已完成设置
+    pub fn is_complete(&self) -> bool {
+        self
+            .0
+            .status
+            .load(Ordering::Relaxed) == 3
+    }
+
+    /// 设置异步值
+    pub fn set(self, value: V) {
+        loop {
+            match self.0.status.compare_exchange(1,
+                                                 2,
+                                                 Ordering::Acquire,
+                                                 Ordering::Relaxed) {
+                Err(0) => {
+                    match self.0.status.compare_exchange(0,
+                                                         2,
+                                                         Ordering::Acquire,
+                                                         Ordering::Relaxed) {
+                        Err(1) => {
+                            //异步值的唤醒器已就绪，则继续尝试获取锁
+                            continue;
+                        },
+                        Err(_) => {
+                            //异步值正在设置或已完成设置，则立即返回
+                            return;
+                        },
+                        Ok(_) => {
+                            //异步值的唤醒器未就绪且获取到锁，则设置异步值后将状态设置为已完成设置，并立即返回
+                            unsafe { *self.0.value.get() = Some(value); }
+                            self.0.status.store(3, Ordering::Release);
+                            return;
+                        }
+                     }
+                },
+                Err(_) => {
+                    //异步值正在设置或已完成设置，则立即返回
+                    return;
+                },
+                Ok(_) => {
+                    //异步值的唤醒器已就绪且获取到锁，则立即退出自旋
+                    break;
+                }
+            }
+        }
+
+        //已锁且获取到锁，则设置异步值，将状态设置为已完成设置，并立即唤醒异步值
+        unsafe { *self.0.value.get() = Some(value); }
+        self.0.status.store(3, Ordering::Release);
+        let waker = unsafe { (*self.0.waker.get()).take().unwrap() };
+        waker.wake();
+    }
+}
+
+// 同步非阻塞的内部异步值，只允许被同步非阻塞的设置一次值
+pub struct InnerAsyncValueNonBlocking<V: Send + 'static> {
     value:  UnsafeCell<Option<V>>,      //值
     waker:  UnsafeCell<Option<Waker>>,  //唤醒器
     status: AtomicU8,                   //状态
@@ -1106,6 +1220,207 @@ impl<V: Send + 'static> AsyncVariable<V> {
 
 // 内部异步可变值，在完成前允许被修改多次
 pub struct InnerAsyncVariable<V: Send + 'static> {
+    value:  UnsafeCell<Option<V>>,      //值
+    waker:  UnsafeCell<Option<Waker>>,  //唤醒器
+    status: AtomicU8,                   //状态
+}
+
+///
+/// 异步非阻塞可变值的守护者
+///
+pub struct AsyncVariableGuardNonBlocking<'a, V: Send + 'static> {
+    value:  &'a UnsafeCell<Option<V>>,      //值
+    waker:  &'a UnsafeCell<Option<Waker>>,  //唤醒器
+    status: &'a AtomicU8,                   //值状态
+}
+
+unsafe impl<V: Send + 'static> Send for AsyncVariableGuardNonBlocking<'_, V> {}
+
+impl<V: Send + 'static> Drop for AsyncVariableGuardNonBlocking<'_, V> {
+    fn drop(&mut self) {
+        //当前异步可变值已锁定，则解除锁定
+        //当前异步可变值的状态为2或6，表示当前异步可变值的唤醒器未就绪并已锁定，或当前异步可变值不需要唤醒并已完成所有修改
+        //当前异步可变值的状态为3或7，表示当前异步可变值的唤醒器已就绪并已锁定，或当前异步可变值已唤醒并已完成所有修改
+        self.status.fetch_sub(2, Ordering::Relaxed);
+    }
+}
+
+impl<V: Send + 'static> Deref for AsyncVariableGuardNonBlocking<'_, V> {
+    type Target = Option<V>;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            &*self.value.get()
+        }
+    }
+}
+
+impl<V: Send + 'static> DerefMut for AsyncVariableGuardNonBlocking<'_, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe {
+            &mut *self.value.get()
+        }
+    }
+}
+
+impl<V: Send + 'static> AsyncVariableGuardNonBlocking<'_, V> {
+    /// 完成异步可变值的修改
+    pub fn finish(self) {
+        //设置异步可变值的状态为已完成修改
+        if self.status.fetch_add(4, Ordering::Relaxed) == 3 {
+            if let Some(waker) = unsafe { (&mut *self.waker.get()).take() } {
+                //当前异步可变值需要唤醒，则立即唤醒异步可变值
+                waker.wake();
+            }
+        }
+    }
+}
+
+///
+/// 异步非阻塞可变值，在完成前允许被同步非阻塞的修改多次
+///
+pub struct AsyncVariableNonBlocking<V: Send + 'static>(Arc<InnerAsyncVariableNonBlocking<V>>);
+
+unsafe impl<V: Send + 'static> Send for AsyncVariableNonBlocking<V> {}
+unsafe impl<V: Send + 'static> Sync for AsyncVariableNonBlocking<V> {}
+
+impl<V: Send + 'static> Clone for AsyncVariableNonBlocking<V> {
+    fn clone(&self) -> Self {
+        AsyncVariableNonBlocking(self.0.clone())
+    }
+}
+
+impl<V: Send + 'static> Future for AsyncVariableNonBlocking<V> {
+    type Output = V;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        unsafe {
+            *self.0.waker.get() = Some(cx.waker().clone()); //设置异步可变值的唤醒器准备就绪
+        }
+
+        let mut spin_len = 1;
+        loop {
+            match self.0.status.compare_exchange(0,
+                                                 1,
+                                                 Ordering::Acquire,
+                                                 Ordering::Relaxed) {
+                Err(current) if current & 4 != 0 => {
+                    //异步可变值已完成所有修改，则立即返回
+                    unsafe {
+                        let _ = (&mut *self.0.waker.get()).take(); //释放异步可变值的唤醒器
+                        return Poll::Ready((&mut *(&self).0.value.get()).take().unwrap());
+                    }
+                },
+                Err(_) => {
+                    //还未完成值修改，则自旋等待
+                    spin_len = spin(spin_len);
+                },
+                Ok(_) => {
+                    //异步可变值已挂起
+                    return Poll::Pending;
+                },
+            }
+        }
+    }
+}
+
+impl<V: Send + 'static> AsyncVariableNonBlocking<V> {
+    /// 构建异步可变值，默认值为未就绪
+    pub fn new() -> Self {
+        let inner = InnerAsyncVariableNonBlocking {
+            value: UnsafeCell::new(None),
+            waker: UnsafeCell::new(None),
+            status: AtomicU8::new(0),
+        };
+
+        AsyncVariableNonBlocking(Arc::new(inner))
+    }
+
+    /// 判断异步可变值是否已完成设置
+    pub fn is_complete(&self) -> bool {
+        self
+            .0
+            .status
+            .load(Ordering::Acquire) & 4 != 0
+    }
+
+    /// 锁住待修改的异步可变值，并返回当前异步可变值的守护者，如果异步可变值已完成修改则返回空
+    pub fn lock(&self) -> Option<AsyncVariableGuardNonBlocking<V>> {
+        let mut spin_len = 1;
+        loop {
+            match self
+                .0
+                .status
+                .compare_exchange(1,
+                                  3,
+                                  Ordering::Acquire,
+                                  Ordering::Relaxed) {
+                Err(0) => {
+                    //异步可变值还未就绪，则自旋等待
+                    match self
+                        .0
+                        .status
+                        .compare_exchange(0,
+                                          2,
+                                          Ordering::Acquire,
+                                          Ordering::Relaxed) {
+                        Err(1) => {
+                            //异步可变值已就绪，则继续尝试获取锁
+                            continue;
+                        },
+                        Err(2) => {
+                            //异步可变值的唤醒器未就绪且已锁，但未获取到锁，则自旋等待
+                            spin_len = spin(spin_len);
+                        },
+                        Err(3) => {
+                            //异步可变值的唤醒器已就绪且已锁，但未获取到锁，则自旋等待
+                            spin_len = spin(spin_len);
+                        },
+                        Err(_) => {
+                            //已完成，则返回空
+                            return None;
+                        },
+                        Ok(_) => {
+                            //异步可变值的唤醒器未就绪且获取到锁，则返回异步可变值的守护者
+                            let guard = AsyncVariableGuardNonBlocking {
+                                value: &self.0.value,
+                                waker: &self.0.waker,
+                                status: &self.0.status,
+                            };
+
+                            return Some(guard)
+                        },
+                    }
+                },
+                Err(2) => {
+                    //异步可变值的唤醒器未就绪且已锁，但未获取到锁，则自旋等待
+                    spin_len = spin(spin_len);
+                },
+                Err(3) => {
+                    //异步可变值的唤醒器已就绪且已锁，但未获取到锁，则自旋等待
+                    spin_len = spin(spin_len);
+                },
+                Err(_) => {
+                    //已完成，则返回空
+                    return None;
+                }
+                Ok(_) => {
+                    //异步可变值的唤醒器已就绪且获取到锁，则返回异步可变值的守护者
+                    let guard = AsyncVariableGuardNonBlocking {
+                        value: &self.0.value,
+                        waker: &self.0.waker,
+                        status: &self.0.status,
+                    };
+
+                    return Some(guard)
+                },
+            }
+        }
+    }
+}
+
+// 内部异步非阻塞可变值，在完成前允许被同步非阻塞的修改多次
+pub struct InnerAsyncVariableNonBlocking<V: Send + 'static> {
     value:  UnsafeCell<Option<V>>,      //值
     waker:  UnsafeCell<Option<Waker>>,  //唤醒器
     status: AtomicU8,                   //状态
