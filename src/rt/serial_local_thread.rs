@@ -54,7 +54,7 @@ impl<O: Default + 'static> LocalTask<O> {
 ///
 /// 本地异步任务运行时
 ///
-pub struct LocalTaskRuntime<O: Default + 'static = ()>(Rc<(
+pub struct LocalTaskRuntime<O: Default + 'static = ()>(Arc<(
     usize,                                      //运行时唯一id
     Arc<AtomicBool>,                            //运行状态
     SegQueue<Arc<LocalTask<O>>>,                //待唤醒本地异步任务队列
@@ -198,7 +198,8 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
 
             //在本地线程中推动当前运行时执行
             unsafe {
-                if let Some(task) = (&mut *(self.0).3.get()).pop_front() {
+                let option = (&mut *(self.0).3.get()).pop_front();
+                if let Some(task) = option {
                     let waker = waker_ref(&task);
                     let mut context = Context::from_waker(&*waker);
                     if let Some(mut future) = task.get_inner() {
@@ -270,7 +271,7 @@ impl<O: Default + 'static> LocalTaskRunner<O> {
                 UnsafeCell::new(VecDeque::new()),
         );
 
-        LocalTaskRunner(LocalTaskRuntime(Rc::new(inner)))
+        LocalTaskRunner(LocalTaskRuntime(Arc::new(inner)))
     }
 
     /// 获取当前本地异步任务执行器的运行时
@@ -303,7 +304,8 @@ impl<O: Default + 'static> LocalTaskRunner<O> {
     #[inline]
     pub fn run_once(&self) {
         unsafe {
-            if let Some(task) = (&mut *((self.0).0).3.get()).pop_front() {
+            let option = (&mut *((self.0).0).3.get()).pop_front();
+            if let Some(task) = option {
                 let waker = waker_ref(&task);
                 let mut context = Context::from_waker(&*waker);
                 if let Some(mut future) = task.get_inner() {
