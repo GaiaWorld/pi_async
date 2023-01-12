@@ -12,7 +12,6 @@ use futures::{task::{ArcWake, waker_ref},
               future::{FutureExt, LocalBoxFuture},
               stream::{StreamExt, Stream, LocalBoxStream}};
 use async_stream::stream;
-use parking_lot::Mutex;
 use crossbeam_channel::bounded;
 use crossbeam_queue::SegQueue;
 use flume::bounded as async_bounded;
@@ -23,7 +22,7 @@ use crate::{lock::spin,
 
 // 本地异步任务
 pub(crate) struct LocalTask<O: Default + 'static = ()> {
-    inner:      Mutex<Option<LocalBoxFuture<'static, O>>>, //内部本地异步任务
+    inner:      UnsafeCell<Option<LocalBoxFuture<'static, O>>>, //内部本地异步任务
     runtime:    LocalTaskRuntime<O>,                            //本地异步任务运行时
 }
 
@@ -39,12 +38,16 @@ impl<O: Default + 'static> ArcWake for LocalTask<O> {
 impl<O: Default + 'static> LocalTask<O> {
     // 获取内部本地异步任务
     pub fn get_inner(&self) -> Option<LocalBoxFuture<'static, O>> {
-        self.inner.lock().take()
+        unsafe {
+            (&mut *self.inner.get()).take()
+        }
     }
 
     // 设置内部本地异步任务
     pub fn set_inner(&self, inner: Option<LocalBoxFuture<'static, O>>) {
-        *self.inner.lock() = inner;
+        unsafe {
+            *self.inner.get() = inner;
+        }
     }
 }
 
@@ -54,8 +57,7 @@ impl<O: Default + 'static> LocalTask<O> {
 pub struct LocalTaskRuntime<O: Default + 'static = ()>(Arc<(
     usize,                                      //运行时唯一id
     Arc<AtomicBool>,                            //运行状态
-    SegQueue<Arc<LocalTask<O>>>,                //待唤醒本地异步任务队列
-    UnsafeCell<VecDeque<Arc<LocalTask<O>>>>,    //本地异步任务池
+    SegQueue<Arc<LocalTask<O>>>,                //本地异步任务池
 )>);
 
 unsafe impl<O: Default + 'static> Send for LocalTaskRuntime<O> {}
@@ -82,26 +84,24 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
     /// 获取当前异步运行时任务数量
     pub fn len(&self) -> usize {
         unsafe {
-            (&*(self.0).3.get()).len()
+            (self.0).2.len()
         }
     }
 
     /// 派发一个指定的异步任务到异步运行时
     pub fn spawn<F>(&self, future: F)
         where F: Future<Output = O> + 'static {
-        unsafe {
-            (&mut *(self.0).3.get()).push_back(Arc::new(LocalTask {
-                inner: Mutex::new(Some(future.boxed_local())),
-                runtime: self.clone(),
-            }));
-        }
+        self.will_wakeup_once(Arc::new(LocalTask {
+            inner: UnsafeCell::new(Some(future.boxed_local())),
+            runtime: self.clone(),
+        }));
     }
 
     /// 线程安全的发送一个异步任务到异步运行时
     pub fn send<F>(&self, future: F)
         where F: Future<Output = O> + 'static {
         self.will_wakeup_once(Arc::new(LocalTask {
-            inner: Mutex::new(Some(future.boxed_local())),
+            inner: UnsafeCell::new(Some(future.boxed_local())),
             runtime: self.clone(),
         }));
     }
@@ -109,11 +109,7 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
     /// 线程安全的唤醒一个将被唤醒的本地异步任务
     #[inline]
     pub fn wakeup_once(&self) {
-        if let Some(task) = (self.0).2.pop() {
-            unsafe {
-                (&mut *(self.0).3.get()).push_back(task);
-            }
-        }
+
     }
 
     /// 线程安全的将一个挂起的本地异步任务设置为将被唤醒的本地异步任务
@@ -195,7 +191,7 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
 
             //在本地线程中推动当前运行时执行
             unsafe {
-                let option = (&mut *(self.0).3.get()).pop_front();
+                let option = (self.0).2.pop();
                 if let Some(task) = option {
                     let waker = waker_ref(&task);
                     let mut context = Context::from_waker(&*waker);
@@ -265,7 +261,6 @@ impl<O: Default + 'static> LocalTaskRunner<O> {
                 alloc_rt_uid(),
                 Arc::new(AtomicBool::new(false)),
                 SegQueue::new(),
-                UnsafeCell::new(VecDeque::new()),
         );
 
         LocalTaskRunner(LocalTaskRuntime(Arc::new(inner)))
@@ -301,7 +296,7 @@ impl<O: Default + 'static> LocalTaskRunner<O> {
     #[inline]
     pub fn run_once(&self) {
         unsafe {
-            let option = (&mut *((self.0).0).3.get()).pop_front();
+            let option = (&(self.0).0).2.pop();
             if let Some(task) = option {
                 let waker = waker_ref(&task);
                 let mut context = Context::from_waker(&*waker);
