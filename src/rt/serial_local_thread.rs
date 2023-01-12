@@ -12,6 +12,7 @@ use futures::{task::{ArcWake, waker_ref},
               future::{FutureExt, LocalBoxFuture},
               stream::{StreamExt, Stream, LocalBoxStream}};
 use async_stream::stream;
+use parking_lot::Mutex;
 use crossbeam_channel::bounded;
 use crossbeam_queue::SegQueue;
 use flume::bounded as async_bounded;
@@ -22,7 +23,7 @@ use crate::{lock::spin,
 
 // 本地异步任务
 pub(crate) struct LocalTask<O: Default + 'static = ()> {
-    inner:      UnsafeCell<Option<LocalBoxFuture<'static, O>>>, //内部本地异步任务
+    inner:      Mutex<Option<LocalBoxFuture<'static, O>>>, //内部本地异步任务
     runtime:    LocalTaskRuntime<O>,                            //本地异步任务运行时
 }
 
@@ -38,16 +39,12 @@ impl<O: Default + 'static> ArcWake for LocalTask<O> {
 impl<O: Default + 'static> LocalTask<O> {
     // 获取内部本地异步任务
     pub fn get_inner(&self) -> Option<LocalBoxFuture<'static, O>> {
-        unsafe {
-            (&mut *self.inner.get()).take()
-        }
+        self.inner.lock().take()
     }
 
     // 设置内部本地异步任务
     pub fn set_inner(&self, inner: Option<LocalBoxFuture<'static, O>>) {
-        unsafe {
-            *self.inner.get() = inner;
-        }
+        *self.inner.lock() = inner;
     }
 }
 
@@ -94,7 +91,7 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
         where F: Future<Output = O> + 'static {
         unsafe {
             (&mut *(self.0).3.get()).push_back(Arc::new(LocalTask {
-                inner: UnsafeCell::new(Some(future.boxed_local())),
+                inner: Mutex::new(Some(future.boxed_local())),
                 runtime: self.clone(),
             }));
         }
@@ -104,7 +101,7 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
     pub fn send<F>(&self, future: F)
         where F: Future<Output = O> + 'static {
         self.will_wakeup_once(Arc::new(LocalTask {
-            inner: UnsafeCell::new(Some(future.boxed_local())),
+            inner: Mutex::new(Some(future.boxed_local())),
             runtime: self.clone(),
         }));
     }
