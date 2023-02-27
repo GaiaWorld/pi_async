@@ -5,7 +5,7 @@ use test::Bencher;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pi_async::rt::multi_thread::{MultiTaskPool, MultiTaskRuntime};
+use pi_async::rt::multi_thread::{MultiTaskRuntime, MultiTaskRuntimeBuilder};
 use pi_async::rt::{AsyncRuntime, AsyncValue};
 use pi_async::lock::mutex_lock::Mutex;
 
@@ -14,11 +14,11 @@ use crossbeam_channel::{bounded, unbounded};
 
 #[bench]
 fn bench_async_mutex(b: &mut Bencher) {
-    let pool0 = MultiTaskPool::new("Bencher-Runtime".to_string(), 1, 1024 * 1024, 10, None);
-    let rt0: MultiTaskRuntime<()> = pool0.startup(false);
+    let pool0 = MultiTaskRuntimeBuilder::default();
+    let rt0: MultiTaskRuntime<()> = pool0.build();
 
-    let pool1 = MultiTaskPool::new("Bencher-Runtime".to_string(), 1, 1024 * 1024, 10, None);
-    let rt1: MultiTaskRuntime<()> = pool1.startup(false);
+    let pool1 = MultiTaskRuntimeBuilder::default();
+    let rt1: MultiTaskRuntime<()> = pool1.build();
 
     b.iter(|| {
         let rt0_copy = rt0.clone();
