@@ -11,3 +11,5 @@
 pub mod prelude;
 pub mod lock;
 pub mod rt;
+
+mod tests;

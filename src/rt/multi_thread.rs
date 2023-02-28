@@ -2,48 +2,40 @@
 //!
 
 use std::any::Any;
-use std::vec::IntoIter;
-use std::future::Future;
-use std::mem::transmute;
-use std::time::Duration;
 use std::cell::UnsafeCell;
-use std::sync::{Arc, Weak};
+use std::future::Future;
+use std::io::{Error, ErrorKind, Result};
 use std::marker::PhantomData;
+use std::mem::transmute;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::task::{Context, Poll, Waker};
 use std::thread::{self, Builder};
-use std::task::{Waker, Context, Poll};
-use std::io::{Error, Result, ErrorKind};
-use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicPtr, Ordering};
+use std::time::Duration;
+use std::vec::IntoIter;
 
-use parking_lot::{Mutex, RwLock, Condvar};
-use crossbeam_channel::{Sender, bounded, unbounded};
-use crossbeam_deque::{Injector, Stealer, Steal, Worker};
+use async_stream::stream;
+use crossbeam_channel::{bounded, unbounded, Sender};
+use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use crossbeam_queue::{ArrayQueue, SegQueue};
 use flume::bounded as async_bounded;
-use futures::{future::{FutureExt, BoxFuture},
-              stream::{Stream, StreamExt, BoxStream},
-              task::{ArcWake, waker_ref}, TryFuture};
-use async_stream::stream;
-use num_cpus;
+use futures::{
+    future::{BoxFuture, FutureExt},
+    stream::{BoxStream, Stream, StreamExt},
+    task::{waker_ref, ArcWake},
+    TryFuture,
+};
 use log::{debug, warn};
+use num_cpus;
+use parking_lot::{Condvar, Mutex, RwLock};
 use pi_time::Instant;
 
-use super::{PI_ASYNC_LOCAL_THREAD_ASYNC_RUNTIME,
-            AsyncTaskPool,
-            AsyncTaskPoolExt,
-            AsyncRuntimeExt,
-            TaskId,
-            AsyncTask,
-            AsyncRuntime,
-            AsyncTimingTask,
-            AsyncTaskTimer,
-            AsyncWaitTimeout,
-            AsyncWait,
-            AsyncWaitAny,
-            AsyncWaitAnyCallback,
-            AsyncMapReduce,
-            AsyncPipelineResult,
-            LocalAsyncRuntime,
-            alloc_rt_uid, local_async_runtime};
+use super::{
+    alloc_rt_uid, local_async_runtime, AsyncMapReduce, AsyncPipelineResult, AsyncRuntime,
+    AsyncRuntimeExt, AsyncTask, AsyncTaskPool, AsyncTaskPoolExt, AsyncTaskTimer, AsyncTimingTask,
+    AsyncWait, AsyncWaitAny, AsyncWaitAnyCallback, AsyncWaitTimeout, LocalAsyncRuntime, TaskId,
+    PI_ASYNC_LOCAL_THREAD_ASYNC_RUNTIME,
+};
 
 /*
 * 默认的初始工作者数量
@@ -84,9 +76,9 @@ thread_local! {
 /// 计算型的工作者任务队列
 ///
 struct ComputationalTaskQueue<O: Default + 'static> {
-    stack:          Worker<Arc<AsyncTask<ComputationalTaskPool<O>, O>>>,    //工作者任务栈
-    queue:          SegQueue<Arc<AsyncTask<ComputationalTaskPool<O>, O>>>,  //工作者任务队列
-    thread_waker:   Arc<(AtomicBool, Mutex<()>, Condvar)>,                  //工作者线程的唤醒器
+    stack: Worker<Arc<AsyncTask<ComputationalTaskPool<O>, O>>>, //工作者任务栈
+    queue: SegQueue<Arc<AsyncTask<ComputationalTaskPool<O>, O>>>, //工作者任务队列
+    thread_waker: Arc<(AtomicBool, Mutex<()>, Condvar)>,        //工作者线程的唤醒器
 }
 
 impl<O: Default + 'static> ComputationalTaskQueue<O> {
@@ -98,7 +90,7 @@ impl<O: Default + 'static> ComputationalTaskQueue<O> {
         ComputationalTaskQueue {
             stack,
             queue,
-            thread_waker
+            thread_waker,
         }
     }
 
@@ -112,10 +104,10 @@ impl<O: Default + 'static> ComputationalTaskQueue<O> {
 /// 计算型的多线程任务池，适合用于Cpu密集型的应用，不支持运行时伸缩
 ///
 pub struct ComputationalTaskPool<O: Default + 'static> {
-    workers:        Vec<ComputationalTaskQueue<O>>,                                     //工作者的任务队列列表
-    waits:          Option<Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>>,     //待唤醒的工作者唤醒器队列
-    consume_count:  Arc<AtomicUsize>,                                                   //任务消费计数
-    produce_count:  Arc<AtomicUsize>,                                                   //任务生产计数
+    workers: Vec<ComputationalTaskQueue<O>>, //工作者的任务队列列表
+    waits: Option<Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>>, //待唤醒的工作者唤醒器队列
+    consume_count: Arc<AtomicUsize>,                                       //任务消费计数
+    produce_count: Arc<AtomicUsize>,                                       //任务生产计数
 }
 
 unsafe impl<O: Default + 'static> Send for ComputationalTaskPool<O> {}
@@ -136,16 +128,16 @@ impl<O: Default + 'static> AsyncTaskPool<O> for ComputationalTaskPool<O> {
 
     #[inline]
     fn get_thread_id(&self) -> usize {
-        match PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-            unsafe { *thread_id.get() }
-        }) {
+        match PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe { *thread_id.get() }) {
             Err(e) => {
                 //不应该执行到这个分支
-                panic!("Get thread id failed, thread: {:?}, reason: {:?}", thread::current(), e);
-            },
-            Ok(id) => {
-                id
+                panic!(
+                    "Get thread id failed, thread: {:?}, reason: {:?}",
+                    thread::current(),
+                    e
+                );
             }
+            Ok(id) => id,
         }
     }
 
@@ -154,7 +146,8 @@ impl<O: Default + 'static> AsyncTaskPool<O> for ComputationalTaskPool<O> {
         if let Some(len) = self
             .produce_count
             .load(Ordering::Relaxed)
-            .checked_sub(self.consume_count.load(Ordering::Relaxed)) {
+            .checked_sub(self.consume_count.load(Ordering::Relaxed))
+        {
             len
         } else {
             0
@@ -220,8 +213,7 @@ impl<O: Default + 'static> AsyncTaskPool<O> for ComputationalTaskPool<O> {
 
 impl<O: Default + 'static> AsyncTaskPoolExt<O> for ComputationalTaskPool<O> {
     #[inline]
-    fn set_waits(&mut self,
-                 waits: Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>) {
+    fn set_waits(&mut self, waits: Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>) {
         self.waits = Some(waits);
     }
 
@@ -273,24 +265,28 @@ impl<O: Default + 'static> ComputationalTaskPool<O> {
 /// 可窃取的工作者任务队列
 ///
 struct StealableTaskQueue<O: Default + 'static> {
-    stack:          Worker<Arc<AsyncTask<StealableTaskPool<O>, O>>>,    //工作者任务栈
-    queue:          Worker<Arc<AsyncTask<StealableTaskPool<O>, O>>>,    //工作者任务队列，可窃取
-    thread_waker:   Arc<(AtomicBool, Mutex<()>, Condvar)>,              //工作者线程的唤醒器
+    stack: Worker<Arc<AsyncTask<StealableTaskPool<O>, O>>>, //工作者任务栈
+    queue: Worker<Arc<AsyncTask<StealableTaskPool<O>, O>>>, //工作者任务队列，可窃取
+    thread_waker: Arc<(AtomicBool, Mutex<()>, Condvar)>,    //工作者线程的唤醒器
 }
 
 impl<O: Default + 'static> StealableTaskQueue<O> {
     //构建可窃取的工作者任务队列
-    pub fn new(thread_waker: Arc<(AtomicBool, Mutex<()>, Condvar)>)
-               -> (Self, Stealer<Arc<AsyncTask<StealableTaskPool<O>, O>>>) {
+    pub fn new(
+        thread_waker: Arc<(AtomicBool, Mutex<()>, Condvar)>,
+    ) -> (Self, Stealer<Arc<AsyncTask<StealableTaskPool<O>, O>>>) {
         let stack = Worker::new_lifo();
         let queue = Worker::new_fifo();
         let stealer = queue.stealer();
 
-        (StealableTaskQueue {
-            stack,
-            queue,
-            thread_waker
-        }, stealer)
+        (
+            StealableTaskQueue {
+                stack,
+                queue,
+                thread_waker,
+            },
+            stealer,
+        )
     }
 
     //获取可窃取的工作者任务队列的任务数量
@@ -303,13 +299,13 @@ impl<O: Default + 'static> StealableTaskQueue<O> {
 /// 可窃取的多线程任务池，适合用于block较多的应用，支持运行时伸缩
 ///
 pub struct StealableTaskPool<O: Default + 'static> {
-    public:             Injector<Arc<AsyncTask<StealableTaskPool<O>, O>>>,                          //公共的任务池
-    workers:            Vec<Arc<RwLock<Option<StealableTaskQueue<O>>>>>,                            //工作者的任务队列列表
-    worker_stealers:    Vec<Arc<RwLock<Option<Stealer<Arc<AsyncTask<StealableTaskPool<O>, O>>>>>>>, //工作者任务队列的窃取者
-    frees:              ArrayQueue<usize>,                                                          //可分派的工作者列表偏移
-    waits:              Option<Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>>,             //待唤醒的工作者唤醒器队列
-    consume_count:      Arc<AtomicUsize>,                                                           //任务消费计数
-    produce_count:      Arc<AtomicUsize>,                                                           //任务生产计数
+    public: Injector<Arc<AsyncTask<StealableTaskPool<O>, O>>>, //公共的任务池
+    workers: Vec<Arc<RwLock<Option<StealableTaskQueue<O>>>>>,  //工作者的任务队列列表
+    worker_stealers: Vec<Arc<RwLock<Option<Stealer<Arc<AsyncTask<StealableTaskPool<O>, O>>>>>>>, //工作者任务队列的窃取者
+    frees: ArrayQueue<usize>, //可分派的工作者列表偏移
+    waits: Option<Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>>, //待唤醒的工作者唤醒器队列
+    consume_count: Arc<AtomicUsize>,                                       //任务消费计数
+    produce_count: Arc<AtomicUsize>,                                       //任务生产计数
 }
 
 unsafe impl<O: Default + 'static> Send for StealableTaskPool<O> {}
@@ -326,16 +322,16 @@ impl<O: Default + 'static> AsyncTaskPool<O> for StealableTaskPool<O> {
 
     #[inline]
     fn get_thread_id(&self) -> usize {
-        match PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-            unsafe { *thread_id.get() }
-        }) {
+        match PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe { *thread_id.get() }) {
             Err(e) => {
                 //不应该执行到这个分支
-                panic!("Get thread id failed, thread: {:?}, reason: {:?}", thread::current(), e);
-            },
-            Ok(id) => {
-                id
+                panic!(
+                    "Get thread id failed, thread: {:?}, reason: {:?}",
+                    thread::current(),
+                    e
+                );
             }
+            Ok(id) => id,
         }
     }
 
@@ -344,7 +340,8 @@ impl<O: Default + 'static> AsyncTaskPool<O> for StealableTaskPool<O> {
         if let Some(len) = self
             .produce_count
             .load(Ordering::Relaxed)
-            .checked_sub(self.consume_count.load(Ordering::Relaxed)) {
+            .checked_sub(self.consume_count.load(Ordering::Relaxed))
+        {
             len
         } else {
             0
@@ -367,8 +364,13 @@ impl<O: Default + 'static> AsyncTaskPool<O> for StealableTaskPool<O> {
             return Ok(());
         }
 
-        Err(Error::new(ErrorKind::Other,
-                       format!("Push timed out failed, thread id: {}, reason: worker not exists", id)))
+        Err(Error::new(
+            ErrorKind::Other,
+            format!(
+                "Push timed out failed, thread id: {}, reason: worker not exists",
+                id
+            ),
+        ))
     }
 
     #[inline]
@@ -400,16 +402,16 @@ impl<O: Default + 'static> AsyncTaskPool<O> for StealableTaskPool<O> {
                         Steal::Retry => {
                             //需要重试窃取公共任务池的任务
                             continue;
-                        },
+                        }
                         Steal::Success(task) => {
                             //从已窃取的所有公共任务中获取到首个任务，并立即返回
                             self.consume_count.fetch_add(1, Ordering::Relaxed);
                             return Some(task);
-                        },
+                        }
                         Steal::Empty => {
                             //公共任务池中没有可窃取的任务
                             break;
-                        },
+                        }
                     }
                 }
 
@@ -431,7 +433,7 @@ impl<O: Default + 'static> AsyncTaskPool<O> for StealableTaskPool<O> {
                                 Steal::Retry => {
                                     //需要重试窃取指定工作者中的任务
                                     continue;
-                                },
+                                }
                                 Steal::Success(task) => {
                                     //从指定工作者中窃取到任务
                                     if steal_task.is_none() {
@@ -442,7 +444,7 @@ impl<O: Default + 'static> AsyncTaskPool<O> for StealableTaskPool<O> {
                                         //当前已窃取过任务，则加入当前工作者的任务队列中
                                         worker.queue.push(task);
                                     }
-                                },
+                                }
                                 Steal::Empty => {
                                     //指定工作者中没有可窃取的任务，则继续窃取下一个工作者的任务
                                     break;
@@ -478,8 +480,7 @@ impl<O: Default + 'static> AsyncTaskPool<O> for StealableTaskPool<O> {
 
 impl<O: Default + 'static> AsyncTaskPoolExt<O> for StealableTaskPool<O> {
     #[inline]
-    fn set_waits(&mut self,
-                 waits: Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>) {
+    fn set_waits(&mut self, waits: Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>) {
         self.waits = Some(waits);
     }
 
@@ -556,11 +557,17 @@ impl<O: Default + 'static> AsyncTaskPoolExt<O> for StealableTaskPool<O> {
 
         //移除当前线程的工作者任务池
         let _ = self.workers[thread_id].write().take();
-        warn!("Remove worker task pool ok, worker: {}, thread: {:?}", thread_id, current);
+        warn!(
+            "Remove worker task pool ok, worker: {}, thread: {:?}",
+            thread_id, current
+        );
 
         //移除当前线程的工作者的任务窃取者
         let _ = self.worker_stealers[thread_id].write().take();
-        warn!("Remove worker stealer ok, worker: {}, thread: {:?}", thread_id, current);
+        warn!(
+            "Remove worker stealer ok, worker: {}, thread: {:?}",
+            thread_id, current
+        );
 
         //记录当前被关闭的工作者偏移
         self.frees.push(thread_id);
@@ -581,7 +588,10 @@ impl<O: Default + 'static> StealableTaskPool<O> {
     pub fn with(init: usize, max: usize) -> Self {
         if init == 0 || max == 0 || init > max {
             //初始工作者任务池数量或最大工作者任务池数量无效，则立即抛出异常
-            panic!("Create MultiTaskPool failed, init: {}, max: {}, reason: invalid init or max", init, max);
+            panic!(
+                "Create MultiTaskPool failed, init: {}, max: {}, reason: invalid init or max",
+                init, max
+            );
         }
 
         let public = Injector::new();
@@ -621,38 +631,43 @@ impl<O: Default + 'static> StealableTaskPool<O> {
 ///
 pub struct MultiTaskRuntime<
     O: Default + 'static = (),
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = StealableTaskPool<O>
->(Arc<(
-    usize,                                                                                      //运行时唯一id
-    Arc<P>,                                                                                     //异步任务池
-    Option<Vec<(Sender<(usize, AsyncTimingTask<P, O>)>, Arc<Mutex<AsyncTaskTimer<P, O>>>)>>,    //休眠的异步任务生产者和本地定时器
-    AtomicUsize,                                                                                //定时任务计数器
-    Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>,                                     //待唤醒的工作者唤醒器队列
-    (String, usize, usize, u64, Option<usize>),                                                 //当前运行时配置参数
-)>);
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = StealableTaskPool<O>,
+>(
+    Arc<(
+        usize,  //运行时唯一id
+        Arc<P>, //异步任务池
+        Option<
+            Vec<(
+                Sender<(usize, AsyncTimingTask<P, O>)>,
+                Arc<Mutex<AsyncTaskTimer<P, O>>>,
+            )>,
+        >, //休眠的异步任务生产者和本地定时器
+        AtomicUsize, //定时任务计数器
+        Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>, //待唤醒的工作者唤醒器队列
+        (String, usize, usize, u64, Option<usize>), //当前运行时配置参数
+    )>,
+);
 
-unsafe impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-> Send for MultiTaskRuntime<O, P> {}
-unsafe impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-> Sync for MultiTaskRuntime<O, P> {}
+unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Send
+    for MultiTaskRuntime<O, P>
+{
+}
+unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Sync
+    for MultiTaskRuntime<O, P>
+{
+}
 
-impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-> Clone for MultiTaskRuntime<O, P> {
+impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Clone
+    for MultiTaskRuntime<O, P>
+{
     fn clone(&self) -> Self {
         MultiTaskRuntime(self.0.clone())
     }
 }
 
-impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-> AsyncRuntime<O> for MultiTaskRuntime<O, P> {
+impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> AsyncRuntime<O>
+    for MultiTaskRuntime<O, P>
+{
     type Pool = P;
 
     /// 共享运行时内部任务池
@@ -689,10 +704,14 @@ impl<
 
     /// 派发一个指定的异步任务到异步运行时
     fn spawn<F>(&self, task_id: TaskId, future: F) -> Result<()>
-        where F: Future<Output = O> + Send + 'static {
-        let task = Arc::new(AsyncTask::new(task_id,
-                                           (self.0).1.clone(),
-                                           Some(future.boxed())));
+    where
+        F: Future<Output = O> + Send + 'static,
+    {
+        let task = Arc::new(AsyncTask::new(
+            task_id,
+            (self.0).1.clone(),
+            Some(future.boxed()),
+        ));
         let result = (self.0).1.push(task);
 
         if let Some(worker_waker) = (self.0).4.pop() {
@@ -717,22 +736,26 @@ impl<
                     if let Some(timers) = &(self.0).2 {
                         //分派一个指定定时器的工作者线程
                         let (_, timer) = &timers[index];
-                        spawn_worker_thread(builder,
-                                            index,
-                                            self.clone(),
-                                            ((self.0).5).1,
-                                            ((self.0).5).3,
-                                            ((self.0).5).4,
-                                            Some(timer.clone()));
+                        spawn_worker_thread(
+                            builder,
+                            index,
+                            self.clone(),
+                            ((self.0).5).1,
+                            ((self.0).5).3,
+                            ((self.0).5).4,
+                            Some(timer.clone()),
+                        );
                     } else {
                         //分派一个没有定时器的工作者线程
-                        spawn_worker_thread(builder,
-                                            index,
-                                            self.clone(),
-                                            ((self.0).5).1,
-                                            ((self.0).5).3,
-                                            ((self.0).5).4,
-                                            None);
+                        spawn_worker_thread(
+                            builder,
+                            index,
+                            self.clone(),
+                            ((self.0).5).1,
+                            ((self.0).5).3,
+                            ((self.0).5).4,
+                            None,
+                        );
                     }
                 }
             }
@@ -743,26 +766,38 @@ impl<
 
     /// 派发一个在指定时间后执行的异步任务到异步运行时，时间单位ms
     fn spawn_timing<F>(&self, task_id: TaskId, future: F, time: usize) -> Result<()>
-        where F: Future<Output = O> + Send + 'static {
+    where
+        F: Future<Output = O> + Send + 'static,
+    {
         if let Some(timers) = &(self.0).2 {
             let mut index: usize = (self.0).3.fetch_add(1, Ordering::Relaxed) % timers.len(); //随机选择一个线程的队列和定时器
             let (_, timer) = &timers[index];
-            timer
-                .lock()
-                .set_timer(AsyncTimingTask::WaitRun(Arc::new(AsyncTask::new(task_id,
-                                                                            (self.0).1.clone(),
-                                                                            Some(future.boxed())))),
-                           time); //为定时器设置定时异步任务
+            timer.lock().set_timer(
+                AsyncTimingTask::WaitRun(Arc::new(AsyncTask::new(
+                    task_id,
+                    (self.0).1.clone(),
+                    Some(future.boxed()),
+                ))),
+                time,
+            ); //为定时器设置定时异步任务
 
             return Ok(());
         }
 
-        Err(Error::new(ErrorKind::Other, format!("Spawn timing task failed, task_id: {:?}, reason: timer not exist", task_id)))
+        Err(Error::new(
+            ErrorKind::Other,
+            format!(
+                "Spawn timing task failed, task_id: {:?}, reason: timer not exist",
+                task_id
+            ),
+        ))
     }
 
     /// 挂起指定唯一id的异步任务
     fn pending<Output>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output> {
-        task_id.0.store(Box::into_raw(Box::new(waker)) as usize, Ordering::Relaxed);
+        task_id
+            .0
+            .store(Box::into_raw(Box::new(waker)) as usize, Ordering::Relaxed);
         Poll::Pending
     }
 
@@ -770,11 +805,9 @@ impl<
     fn wakeup(&self, task_id: &TaskId) {
         match task_id.0.load(Ordering::Relaxed) {
             0 => panic!("Multi runtime wakeup task failed, reason: task id not exist"),
-            ptr => {
-                unsafe {
-                    let waker = Box::from_raw(ptr as *mut Waker);
-                    waker.wake();
-                }
+            ptr => unsafe {
+                let waker = Box::from_raw(ptr as *mut Waker);
+                waker.wake();
             },
         }
     }
@@ -829,28 +862,28 @@ impl<
                 let thread_id = unsafe { *thread_id.get() };
                 timers[thread_id].clone()
             }) {
-                Err(_) => panic!("Multi thread runtime timeout failed, reason: local thread id not match"),
-                Ok((producor, _)) => {
-                    AsyncWaitTimeout::new(rt,
-                                          producor,
-                                          timeout)
-                        .boxed()
-                },
+                Err(_) => {
+                    panic!("Multi thread runtime timeout failed, reason: local thread id not match")
+                }
+                Ok((producor, _)) => AsyncWaitTimeout::new(rt, producor, timeout).boxed(),
             }
         } else {
             //没有本地定时器，则同步休眠指定时间
             async move {
                 thread::sleep(Duration::from_millis(timeout as u64));
-            }.boxed()
+            }
+            .boxed()
         }
     }
 
     /// 生成一个异步管道，输入指定流，输入流的每个值通过过滤器生成输出流的值
     fn pipeline<S, SO, F, FO>(&self, input: S, mut filter: F) -> BoxStream<'static, FO>
-        where S: Stream<Item = SO> + Send + 'static,
-              SO: Send + 'static,
-              F: FnMut(SO) -> AsyncPipelineResult<FO> + Send + 'static,
-              FO: Send + 'static {
+    where
+        S: Stream<Item = SO> + Send + 'static,
+        SO: Send + 'static,
+        F: FnMut(SO) -> AsyncPipelineResult<FO> + Send + 'static,
+        FO: Send + 'static,
+    {
         let output = stream! {
             for await value in input {
                 match filter(value) {
@@ -874,21 +907,20 @@ impl<
     }
 }
 
-impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-> AsyncRuntimeExt<O> for MultiTaskRuntime<O, P> {
-    fn spawn_with_context<F, C>(&self,
-                                task_id: TaskId,
-                                future: F,
-                                context: C) -> Result<()>
-        where F: Future<Output = O> + Send + 'static,
-              C: 'static {
+impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> AsyncRuntimeExt<O>
+    for MultiTaskRuntime<O, P>
+{
+    fn spawn_with_context<F, C>(&self, task_id: TaskId, future: F, context: C) -> Result<()>
+    where
+        F: Future<Output = O> + Send + 'static,
+        C: 'static,
+    {
         let task = Arc::new(AsyncTask::with_context(
             task_id,
             (self.0).1.clone(),
             Some(future.boxed()),
-            context));
+            context,
+        ));
         let result = (self.0).1.push(task);
 
         if let Some(worker_waker) = (self.0).4.pop() {
@@ -913,22 +945,26 @@ impl<
                     if let Some(timers) = &(self.0).2 {
                         //分派一个指定定时器的工作者线程
                         let (_, timer) = &timers[index];
-                        spawn_worker_thread(builder,
-                                            index,
-                                            self.clone(),
-                                            ((self.0).5).1,
-                                            ((self.0).5).3,
-                                            ((self.0).5).4,
-                                            Some(timer.clone()));
+                        spawn_worker_thread(
+                            builder,
+                            index,
+                            self.clone(),
+                            ((self.0).5).1,
+                            ((self.0).5).3,
+                            ((self.0).5).4,
+                            Some(timer.clone()),
+                        );
                     } else {
                         //分派一个没有定时器的工作者线程
-                        spawn_worker_thread(builder,
-                                            index,
-                                            self.clone(),
-                                            ((self.0).5).1,
-                                            ((self.0).5).3,
-                                            ((self.0).5).4,
-                                            None);
+                        spawn_worker_thread(
+                            builder,
+                            index,
+                            self.clone(),
+                            ((self.0).5).1,
+                            ((self.0).5).3,
+                            ((self.0).5).4,
+                            None,
+                        );
                     }
                 }
             }
@@ -937,39 +973,56 @@ impl<
         result
     }
 
-    fn spawn_timing_with_context<F, C>(&self,
-                                       task_id: TaskId,
-                                       future: F,
-                                       context: C,
-                                       time: usize) -> Result<()>
-        where F: Future<Output = O> + Send + 'static,
-              C: 'static {
+    fn spawn_timing_with_context<F, C>(
+        &self,
+        task_id: TaskId,
+        future: F,
+        context: C,
+        time: usize,
+    ) -> Result<()>
+    where
+        F: Future<Output = O> + Send + 'static,
+        C: 'static,
+    {
         if let Some(timers) = &(self.0).2 {
             let mut index: usize = (self.0).3.fetch_add(1, Ordering::Relaxed) % timers.len(); //随机选择一个线程的队列和定时器
             let (_, timer) = &timers[index];
-            timer
-                .lock()
-                .set_timer(AsyncTimingTask::WaitRun(Arc::new(AsyncTask::with_context(task_id,
-                                                                                     (self.0).1.clone(),
-                                                                                     Some(future.boxed()),
-                                                                                     context))),
-                           time); //为定时器设置定时异步任务
+            timer.lock().set_timer(
+                AsyncTimingTask::WaitRun(Arc::new(AsyncTask::with_context(
+                    task_id,
+                    (self.0).1.clone(),
+                    Some(future.boxed()),
+                    context,
+                ))),
+                time,
+            ); //为定时器设置定时异步任务
 
             return Ok(());
         }
 
-        Err(Error::new(ErrorKind::Other, format!("Spawn timing task failed, task_id: {:?}, reason: timer not exist", task_id)))
+        Err(Error::new(
+            ErrorKind::Other,
+            format!(
+                "Spawn timing task failed, task_id: {:?}, reason: timer not exist",
+                task_id
+            ),
+        ))
     }
 
     fn block_on<F>(&self, future: F) -> Result<F::Output>
-        where F: Future + Send + 'static,
-              <F as Future>::Output: Default + Send + 'static {
+    where
+        F: Future + Send + 'static,
+        <F as Future>::Output: Default + Send + 'static,
+    {
         //从本地线程获取当前异步运行时
         if let Some(local_rt) = local_async_runtime::<F::Output>() {
             //本地线程绑定了异步运行时
             if local_rt.get_id() == self.get_id() {
                 //如果是相同运行时，则立即返回错误
-                return Err(Error::new(ErrorKind::WouldBlock, format!("Block on failed, reason: would block")));
+                return Err(Error::new(
+                    ErrorKind::WouldBlock,
+                    format!("Block on failed, reason: would block"),
+                ));
             }
         }
 
@@ -981,25 +1034,26 @@ impl<
 
             Default::default()
         }) {
-            return Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)));
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("Block on failed, reason: {:?}", e),
+            ));
         }
 
         //同步阻塞等待异步任务返回
         match receiver.recv() {
-            Err(e) => {
-                Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)))
-            },
-            Ok(result) => {
-                Ok(result)
-            },
+            Err(e) => Err(Error::new(
+                ErrorKind::Other,
+                format!("Block on failed, reason: {:?}", e),
+            )),
+            Ok(result) => Ok(result),
         }
     }
 }
 
-impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-> MultiTaskRuntime<O, P> {
+impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
+    MultiTaskRuntime<O, P>
+{
     /// 获取当前运行时可新增的工作者数量
     pub fn idler_len(&self) -> usize {
         (self.0).1.idler_len()
@@ -1046,14 +1100,21 @@ impl<
     #[inline]
     pub(crate) fn from_raw(raw: *const ()) -> Self {
         let inner = unsafe {
-            Arc::from_raw(raw as *const (
-                usize,
-                Arc<P>,
-                Option<Vec<(Sender<(usize, AsyncTimingTask<P, O>)>, Arc<Mutex<AsyncTaskTimer<P, O>>>)>>,
-                AtomicUsize,
-                Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>,
-                (String, usize, usize, u64, Option<usize>),
-            ))
+            Arc::from_raw(
+                raw as *const (
+                    usize,
+                    Arc<P>,
+                    Option<
+                        Vec<(
+                            Sender<(usize, AsyncTimingTask<P, O>)>,
+                            Arc<Mutex<AsyncTaskTimer<P, O>>>,
+                        )>,
+                    >,
+                    AtomicUsize,
+                    Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>,
+                    (String, usize, usize, u64, Option<usize>),
+                ),
+            )
         };
         MultiTaskRuntime(inner)
     }
@@ -1067,9 +1128,10 @@ impl<
     }
 
     // 派发一个指定的异步任务到异步运行时
-    pub(crate) fn spawn_raw<F>(raw: *const (),
-                               future: F) -> Result<()>
-        where F: Future<Output = O> + Send  + 'static {
+    pub(crate) fn spawn_raw<F>(raw: *const (), future: F) -> Result<()>
+    where
+        F: Future<Output = O> + Send + 'static,
+    {
         let rt = MultiTaskRuntime::<O, P>::from_raw(raw);
         let result = rt.spawn(rt.alloc(), future);
         Arc::into_raw(rt.0); //避免提前释放
@@ -1077,9 +1139,11 @@ impl<
     }
 
     // 定时派发一个指定的异步任务到异步运行时
-    pub(crate) fn spawn_timing_raw(raw: *const (),
-                                   future: BoxFuture<'static, O>,
-                                   timeout: usize) -> Result<()> {
+    pub(crate) fn spawn_timing_raw(
+        raw: *const (),
+        future: BoxFuture<'static, O>,
+        timeout: usize,
+    ) -> Result<()> {
         let rt = MultiTaskRuntime::<O, P>::from_raw(raw);
         let result = rt.spawn_timing(rt.alloc(), future, timeout);
         Arc::into_raw(rt.0); //避免提前释放
@@ -1100,27 +1164,27 @@ impl<
 ///
 pub struct MultiTaskRuntimeBuilder<
     O: Default + 'static = (),
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = StealableTaskPool<O>
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = StealableTaskPool<O>,
 > {
-    pool:       P,              //异步多线程任务运行时
-    prefix:     String,         //工作者线程名称前缀
-    init:       usize,          //初始工作者数量
-    min:        usize,          //最少工作者数量
-    max:        usize,          //最大工作者数量
-    stack_size: usize,          //工作者线程栈大小
-    timeout:    u64,            //工作者空闲时最长休眠时间
-    interval:   Option<usize>,  //工作者定时器间隔
-    marker:     PhantomData<O>,
+    pool: P,                 //异步多线程任务运行时
+    prefix: String,          //工作者线程名称前缀
+    init: usize,             //初始工作者数量
+    min: usize,              //最少工作者数量
+    max: usize,              //最大工作者数量
+    stack_size: usize,       //工作者线程栈大小
+    timeout: u64,            //工作者空闲时最长休眠时间
+    interval: Option<usize>, //工作者定时器间隔
+    marker: PhantomData<O>,
 }
 
-unsafe impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-> Send for MultiTaskRuntimeBuilder<O, P> {}
-unsafe impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-> Sync for MultiTaskRuntimeBuilder<O, P> {}
+unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Send
+    for MultiTaskRuntimeBuilder<O, P>
+{
+}
+unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Sync
+    for MultiTaskRuntimeBuilder<O, P>
+{
+}
 
 impl<O: Default + 'static> Default for MultiTaskRuntimeBuilder<O> {
     //默认构建可窃取可伸缩的多线程运行时
@@ -1136,10 +1200,9 @@ impl<O: Default + 'static> Default for MultiTaskRuntimeBuilder<O> {
     }
 }
 
-impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-> MultiTaskRuntimeBuilder<O, P> {
+impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
+    MultiTaskRuntimeBuilder<O, P>
+{
     /// 构建指定任务池、线程名前缀、初始线程数量、最少线程数量、最大线程数量、线程栈大小、线程空闲时最长休眠时间和是否使用本地定时器的多线程任务池
     pub fn new(mut pool: P) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1243,7 +1306,13 @@ impl<
             timers,
             AtomicUsize::new(0),
             waits,
-            (self.prefix.clone(), self.min, self.stack_size, self.timeout, self.interval),
+            (
+                self.prefix.clone(),
+                self.min,
+                self.stack_size,
+                self.timeout,
+                self.interval,
+            ),
         )));
 
         //构建初始化线程数量的线程构建器
@@ -1279,62 +1348,74 @@ impl<
 fn spawn_worker_thread<
     O: Default + 'static,
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
->(builder: Builder,
-  index: usize,
-  runtime: MultiTaskRuntime<O, P>,
-  min: usize,
-  timeout: u64,
-  interval: Option<usize>,
-  timer: Option<Arc<Mutex<AsyncTaskTimer<P, O>>>>) {
+>(
+    builder: Builder,
+    index: usize,
+    runtime: MultiTaskRuntime<O, P>,
+    min: usize,
+    timeout: u64,
+    interval: Option<usize>,
+    timer: Option<Arc<Mutex<AsyncTaskTimer<P, O>>>>,
+) {
     if let Some(timer) = timer {
         //设置了定时器
         let _ = builder.spawn(move || {
             //设置线程本地唯一id
-            if let Err(e) = PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-                unsafe { *thread_id.get() = index; }
+            if let Err(e) = PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe {
+                *thread_id.get() = index;
             }) {
-                panic!("Multi thread runtime startup failed, thread id: {:?}, reason: {:?}", index, e);
+                panic!(
+                    "Multi thread runtime startup failed, thread id: {:?}, reason: {:?}",
+                    index, e
+                );
             }
 
             //绑定运行时到线程
             let runtime_copy = runtime.clone();
             match PI_ASYNC_LOCAL_THREAD_ASYNC_RUNTIME.try_with(move |rt| {
-                let raw = Arc::into_raw(Arc::new(runtime_copy.to_local_runtime())) as *mut LocalAsyncRuntime<O> as *mut ();
+                let raw = Arc::into_raw(Arc::new(runtime_copy.to_local_runtime()))
+                    as *mut LocalAsyncRuntime<O> as *mut ();
                 rt.store(raw, Ordering::Relaxed);
             }) {
                 Err(e) => {
                     panic!("Bind multi runtime to local thread failed, reason: {:?}", e);
-                },
+                }
                 Ok(_) => (),
             }
 
             //执行有定时器的工作循环
-            timer_work_loop(runtime,
-                            index,
-                            min,
-                            timeout,
-                            interval.unwrap() as u64,
-                            timer);
+            timer_work_loop(
+                runtime,
+                index,
+                min,
+                timeout,
+                interval.unwrap() as u64,
+                timer,
+            );
         });
     } else {
         //未设置定时器
         let _ = builder.spawn(move || {
             //设置线程本地唯一id
-            if let Err(e) = PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-                unsafe { *thread_id.get() = index; }
+            if let Err(e) = PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe {
+                *thread_id.get() = index;
             }) {
-                panic!("Multi thread runtime startup failed, thread id: {:?}, reason: {:?}", index, e);
+                panic!(
+                    "Multi thread runtime startup failed, thread id: {:?}, reason: {:?}",
+                    index, e
+                );
             }
 
             //绑定运行时到线程
             let runtime_copy = runtime.clone();
             match PI_ASYNC_LOCAL_THREAD_ASYNC_RUNTIME.try_with(move |rt| {
-                let raw = Arc::into_raw(Arc::new(runtime_copy.to_local_runtime())) as *mut LocalAsyncRuntime<O> as *mut ();
+                let raw = Arc::into_raw(Arc::new(runtime_copy.to_local_runtime()))
+                    as *mut LocalAsyncRuntime<O> as *mut ();
                 rt.store(raw, Ordering::Relaxed);
             }) {
                 Err(e) => {
                     panic!("Bind multi runtime to local thread failed, reason: {:?}", e);
-                },
+                }
                 Ok(_) => (),
             }
 
@@ -1345,15 +1426,14 @@ fn spawn_worker_thread<
 }
 
 //线程工作循环
-fn timer_work_loop<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
->(runtime: MultiTaskRuntime<O, P>,
-  index: usize,
-  min: usize,
-  sleep_timeout: u64,
-  timer_interval: u64,
-  timer: Arc<Mutex<AsyncTaskTimer<P, O>>>) {
+fn timer_work_loop<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>(
+    runtime: MultiTaskRuntime<O, P>,
+    index: usize,
+    min: usize,
+    sleep_timeout: u64,
+    timer_interval: u64,
+    timer: Arc<Mutex<AsyncTaskTimer<P, O>>>,
+) {
     //初始化当前线程的线程id和线程活动状态
     let pool = (runtime.0).1.clone();
     let worker_waker = pool.clone_thread_waker().unwrap();
@@ -1374,7 +1454,7 @@ fn timer_work_loop<
                             AsyncTimingTask::Pended(expired) => {
                                 //唤醒休眠的异步任务，不需要立即在本工作者中执行，因为休眠的异步任务无法取消
                                 runtime.wakeup(&expired);
-                            },
+                            }
                             AsyncTimingTask::WaitRun(expired) => {
                                 //执行到期的定时异步任务，需要立即在本工作者中执行，因为定时异步任务可以取消
                                 (runtime.0).1.push_timed_out(handle as u64, expired);
@@ -1382,7 +1462,7 @@ fn timer_work_loop<
                                     sleep_count = 0; //重置连续休眠次数
                                     run_task(&runtime, task);
                                 }
-                            },
+                            }
                         }
 
                         if let Some(task) = pool.try_pop() {
@@ -1429,9 +1509,8 @@ fn timer_work_loop<
                     is_sleep.store(true, Ordering::SeqCst);
 
                     //获取休眠的实际时长
-                    let diff_time =  Instant::now()
-                        .duration_since(timer_run_millis)
-                        .as_millis() as u64; //获取定时器运行时长
+                    let diff_time =
+                        Instant::now().duration_since(timer_run_millis).as_millis() as u64; //获取定时器运行时长
                     let real_timeout = if timer.lock().len() == 0 {
                         //当前定时器没有未到期的任务，则休眠指定时长
                         sleep_timeout
@@ -1451,10 +1530,7 @@ fn timer_work_loop<
 
                     //让当前工作者休眠，等待有任务时被唤醒或超时后自动唤醒
                     if condvar
-                        .wait_for(
-                            &mut locked,
-                            Duration::from_millis(real_timeout),
-                        )
+                        .wait_for(&mut locked, Duration::from_millis(real_timeout))
                         .timed_out()
                     {
                         //条件超时唤醒，则设置状态为未休眠
@@ -1463,28 +1539,32 @@ fn timer_work_loop<
                         sleep_count += 1;
                     }
                 }
-            },
+            }
             Some(task) => {
                 //有任务，则执行
                 sleep_count = 0; //重置连续休眠次数
                 run_task(&runtime, task);
-            },
+            }
         }
     }
 
     //关闭当前工作者的任务池
     (runtime.0).1.close_worker();
-    warn!("Worker of runtime closed, runtime: {}, worker: {}, thread: {:?}",
-          runtime.get_id(),
-          index,
-          thread::current());
+    warn!(
+        "Worker of runtime closed, runtime: {}, worker: {}, thread: {:?}",
+        runtime.get_id(),
+        index,
+        thread::current()
+    );
 }
 
 //线程工作循环
-fn work_loop<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
->(runtime: MultiTaskRuntime<O, P>, index: usize, min: usize, sleep_timeout: u64) {
+fn work_loop<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>(
+    runtime: MultiTaskRuntime<O, P>,
+    index: usize,
+    min: usize,
+    sleep_timeout: u64,
+) {
     //初始化当前线程的线程id和线程活动状态
     let pool = (runtime.0).1.clone();
     let worker_waker = pool.clone_thread_waker().unwrap();
@@ -1522,10 +1602,7 @@ fn work_loop<
 
                     //让当前工作者休眠，等待有任务时被唤醒或超时后自动唤醒
                     if condvar
-                        .wait_for(
-                            &mut locked,
-                            Duration::from_millis(sleep_timeout),
-                        )
+                        .wait_for(&mut locked, Duration::from_millis(sleep_timeout))
                         .timed_out()
                     {
                         //条件超时唤醒，则设置状态为未休眠
@@ -1534,36 +1611,36 @@ fn work_loop<
                         sleep_count += 1;
                     }
                 }
-            },
+            }
             Some(task) => {
                 //有任务，则执行
                 sleep_count = 0; //重置连续休眠次数
                 run_task(&runtime, task);
-            },
+            }
         }
     }
 
     //关闭当前工作者的任务池
     (runtime.0).1.close_worker();
-    warn!("Worker of runtime closed, runtime: {}, worker: {}, thread: {:?}",
-          runtime.get_id(),
-          index,
-          thread::current());
+    warn!(
+        "Worker of runtime closed, runtime: {}, worker: {}, thread: {:?}",
+        runtime.get_id(),
+        index,
+        thread::current()
+    );
 }
 
 //检查是否可以关闭当前工作者
 #[inline]
-fn is_closeable<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
->(runtime: &MultiTaskRuntime<O, P>, min: usize) -> bool {
-    match PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-        unsafe { *thread_id.get() }
-    }) {
+fn is_closeable<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>(
+    runtime: &MultiTaskRuntime<O, P>,
+    min: usize,
+) -> bool {
+    match PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe { *thread_id.get() }) {
         Err(_) => {
             //如果本地线程唯一id不存在，则立即关闭当前工作者
             true
-        },
+        }
         Ok(thread_id) => {
             if runtime.worker_timing_len(thread_id) > 0 {
                 //当前工作者还有未处理的定时任务，则不允许关闭
@@ -1583,16 +1660,16 @@ fn is_closeable<
                     }
                 }
             }
-        },
+        }
     }
 }
 
 //执行异步任务
 #[inline]
-fn run_task<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
->(runtime: &MultiTaskRuntime<O, P>, task: Arc<AsyncTask<P, O>>) {
+fn run_task<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>(
+    runtime: &MultiTaskRuntime<O, P>,
+    task: Arc<AsyncTask<P, O>>,
+) {
     let waker = waker_ref(&task);
     let mut context = Context::from_waker(&*waker);
     if let Some(mut future) = task.get_inner() {
@@ -1611,7 +1688,7 @@ fn test_mutli_task_pool() {
     use std::time::Instant;
 
     let pool = Arc::new(StealableTaskPool::with(8, 8));
-    println!("!!!!!!pool len: {}", pool.len());
+    assert_eq!(pool.len(), 0);
 
     let pool0 = pool.clone();
     let pool1 = pool.clone();
@@ -1638,7 +1715,8 @@ fn test_mutli_task_pool() {
             let task = AsyncTask::new(
                 TaskId(Arc::new(AtomicUsize::new(0))),
                 pool0.clone(),
-                Some(async move {}.boxed()));
+                Some(async move {}.boxed()),
+            );
             pool0.push(Arc::new(task));
         }
     });
@@ -1648,7 +1726,8 @@ fn test_mutli_task_pool() {
             let task = AsyncTask::new(
                 TaskId(Arc::new(AtomicUsize::new(0))),
                 pool1.clone(),
-                Some(async move {}.boxed()));
+                Some(async move {}.boxed()),
+            );
             pool1.push(Arc::new(task));
         }
     });
@@ -1658,7 +1737,8 @@ fn test_mutli_task_pool() {
             let task = AsyncTask::new(
                 TaskId(Arc::new(AtomicUsize::new(0))),
                 pool2.clone(),
-                Some(async move {}.boxed()));
+                Some(async move {}.boxed()),
+            );
             pool2.push(Arc::new(task));
         }
     });
@@ -1668,7 +1748,8 @@ fn test_mutli_task_pool() {
             let task = AsyncTask::new(
                 TaskId(Arc::new(AtomicUsize::new(0))),
                 pool3.clone(),
-                Some(async move {}.boxed()));
+                Some(async move {}.boxed()),
+            );
             pool3.push(Arc::new(task));
         }
     });
@@ -1678,7 +1759,8 @@ fn test_mutli_task_pool() {
             let task = AsyncTask::new(
                 TaskId(Arc::new(AtomicUsize::new(0))),
                 pool4.clone(),
-                Some(async move {}.boxed()));
+                Some(async move {}.boxed()),
+            );
             pool4.push(Arc::new(task));
         }
     });
@@ -1688,7 +1770,8 @@ fn test_mutli_task_pool() {
             let task = AsyncTask::new(
                 TaskId(Arc::new(AtomicUsize::new(0))),
                 pool5.clone(),
-                Some(async move {}.boxed()));
+                Some(async move {}.boxed()),
+            );
             pool5.push(Arc::new(task));
         }
     });
@@ -1698,7 +1781,8 @@ fn test_mutli_task_pool() {
             let task = AsyncTask::new(
                 TaskId(Arc::new(AtomicUsize::new(0))),
                 pool6.clone(),
-                Some(async move {}.boxed()));
+                Some(async move {}.boxed()),
+            );
             pool6.push(Arc::new(task));
         }
     });
@@ -1708,14 +1792,15 @@ fn test_mutli_task_pool() {
             let task = AsyncTask::new(
                 TaskId(Arc::new(AtomicUsize::new(0))),
                 pool7.clone(),
-                Some(async move {}.boxed()));
+                Some(async move {}.boxed()),
+            );
             pool7.push(Arc::new(task));
         }
     });
 
     let join0 = thread::spawn(move || {
-        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-            unsafe { *thread_id.get() = 0; }
+        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe {
+            *thread_id.get() = 0;
         });
 
         let mut count = 0;
@@ -1730,12 +1815,12 @@ fn test_mutli_task_pool() {
             }
             count += 1;
         }
-        println!("!!!!!!pool00 count: {}", count);
+        assert_eq!(count, 1839604);
     });
 
     let join1 = thread::spawn(move || {
-        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-            unsafe { *thread_id.get() = 1; }
+        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe {
+            *thread_id.get() = 1;
         });
 
         let mut count = 0;
@@ -1750,12 +1835,12 @@ fn test_mutli_task_pool() {
             }
             count += 1;
         }
-        println!("!!!!!!pool01 count: {}", count);
+        assert_eq!(count, 1843417);
     });
 
     let join2 = thread::spawn(move || {
-        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-            unsafe { *thread_id.get() = 2; }
+        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe {
+            *thread_id.get() = 2;
         });
 
         let mut count = 0;
@@ -1770,12 +1855,12 @@ fn test_mutli_task_pool() {
             }
             count += 1;
         }
-        println!("!!!!!!pool02 count: {}", count);
+        assert_eq!(count, 1868019);
     });
 
     let join3 = thread::spawn(move || {
-        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-            unsafe { *thread_id.get() = 3; }
+        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe {
+            *thread_id.get() = 3;
         });
 
         let mut count = 0;
@@ -1791,11 +1876,12 @@ fn test_mutli_task_pool() {
             count += 1;
         }
         println!("!!!!!!pool03 count: {}", count);
+        assert_eq!(count, 1843417);
     });
 
     let join4 = thread::spawn(move || {
-        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-            unsafe { *thread_id.get() = 4; }
+        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe {
+            *thread_id.get() = 4;
         });
 
         let mut count = 0;
@@ -1814,8 +1900,8 @@ fn test_mutli_task_pool() {
     });
 
     let join5 = thread::spawn(move || {
-        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-            unsafe { *thread_id.get() = 5; }
+        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe {
+            *thread_id.get() = 5;
         });
 
         let mut count = 0;
@@ -1834,8 +1920,8 @@ fn test_mutli_task_pool() {
     });
 
     let join6 = thread::spawn(move || {
-        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-            unsafe { *thread_id.get() = 6; }
+        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe {
+            *thread_id.get() = 6;
         });
 
         let mut count = 0;
@@ -1854,8 +1940,8 @@ fn test_mutli_task_pool() {
     });
 
     let join7 = thread::spawn(move || {
-        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
-            unsafe { *thread_id.get() = 7; }
+        PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe {
+            *thread_id.get() = 7;
         });
 
         let mut count = 0;
@@ -1881,35 +1967,26 @@ fn test_mutli_task_pool() {
     join5.join();
     join6.join();
     join7.join();
-    println!("pool len: {}, time: {:?}", pool.len(), Instant::now() - start);
+    println!(
+        "pool len: {}, time: {:?}",
+        pool.len(),
+        Instant::now() - start
+    );
 }
 
 #[test]
 fn test_computational_runtime() {
+    use crate::rt::{
+        clear_local_dict, get_local_dict, get_local_dict_mut, remove_local_dict, set_local_dict,
+        spawn_local,
+    };
+    use crate::tests::test_lib::AtomicCounter;
+    use env_logger;
     use std::mem;
     use std::time::Instant;
-    use env_logger;
-    use crate::rt::{spawn_local,
-                    get_local_dict,
-                    get_local_dict_mut,
-                    set_local_dict,
-                    remove_local_dict,
-                    clear_local_dict};
-
     env_logger::init();
-
-    struct AtomicCounter(AtomicUsize, Instant);
-    impl Drop for AtomicCounter {
-        fn drop(&mut self) {
-            unsafe {
-                println!("!!!!!!drop counter, count: {:?}, time: {:?}", self.0.load(Ordering::Relaxed), Instant::now() - self.1);
-            }
-        }
-    }
-
     let pool = ComputationalTaskPool::new(8);
-    let builer = MultiTaskRuntimeBuilder::new(pool)
-        .set_timer_interval(1);
+    let builer = MultiTaskRuntimeBuilder::new(pool).set_timer_interval(1);
     let rt = builer.build();
     let rt0 = rt.clone();
     let rt1 = rt.clone();
@@ -1920,7 +1997,8 @@ fn test_computational_runtime() {
     let rt6 = rt.clone();
     let rt7 = rt.clone();
 
-    let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+    let counter = Arc::new(AtomicCounter::new(16000000));
+    let over_state = counter.get_state();
     let count0 = counter.clone();
     let count1 = counter.clone();
     let count2 = counter.clone();
@@ -1935,9 +2013,9 @@ fn test_computational_runtime() {
         use crate::rt::spawn_local;
 
         if let Err(e) = spawn_local(async move {
-            println!("Test spawn local ok");
+            assert!(true);
         }) {
-            println!("Test spawn local failed, reason: {:?}", e);
+            panic!("Test spawn local failed, reason: {:?}", e);
         }
     });
 
@@ -1945,24 +2023,23 @@ fn test_computational_runtime() {
     let thread_handle = thread::spawn(move || {
         match rt_copy.block_on(async move {
             set_local_dict::<usize>(0);
-            println!("get local dict, init value: {}", *get_local_dict::<usize>().unwrap());
+            assert_eq!(*get_local_dict::<usize>().unwrap(), 0);
             *get_local_dict_mut::<usize>().unwrap() = 0xffffffff;
-            println!("get local dict, value after modify: {}", *get_local_dict::<usize>().unwrap());
+            assert_eq!(*get_local_dict::<usize>().unwrap(), 0xffffffff);
             if let Some(value) = remove_local_dict::<usize>() {
-                println!("get local dict, value after remove: {:?}, last value: {}", get_local_dict::<usize>(), value);
+                assert_eq!(value, 0xffffffff);
             }
             set_local_dict::<usize>(0);
             clear_local_dict();
-            println!("get local dict, value after clear: {:?}", get_local_dict::<usize>());
-
+            assert_eq!(get_local_dict::<usize>(), None);
             "Test block on ok".to_string()
         }) {
             Err(e) => {
-                println!("Test block on failed, reason: {:?}", e);
-            },
+                panic!("Test block on failed, reason: {:?}", e);
+            }
             Ok(r) => {
-                println!("{}", r);
-            },
+                assert_eq!(r, "Test block on ok".to_string());
+            }
         }
     });
     thread_handle.join();
@@ -1972,12 +2049,11 @@ fn test_computational_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count0.clone();
             if let Err(e) = rt0.spawn(rt0.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -1985,12 +2061,11 @@ fn test_computational_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count1.clone();
             if let Err(e) = rt1.spawn(rt1.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -1998,12 +2073,11 @@ fn test_computational_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count2.clone();
             if let Err(e) = rt2.spawn(rt2.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2011,12 +2085,11 @@ fn test_computational_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count3.clone();
             if let Err(e) = rt3.spawn(rt3.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2024,12 +2097,11 @@ fn test_computational_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count4.clone();
             if let Err(e) = rt4.spawn(rt4.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2037,12 +2109,11 @@ fn test_computational_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count5.clone();
             if let Err(e) = rt5.spawn(rt5.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2050,12 +2121,11 @@ fn test_computational_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count6.clone();
             if let Err(e) = rt6.spawn(rt6.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2063,43 +2133,35 @@ fn test_computational_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count7.clone();
             if let Err(e) = rt7.spawn(rt7.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
-
-    thread::sleep(Duration::from_millis(1000000000));
+    loop {
+        if over_state.load(Ordering::Relaxed) {
+            /// 执行完成后退出主程序
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 #[test]
 fn test_stealable_runtime() {
+    use crate::rt::{
+        clear_local_dict, get_local_dict, get_local_dict_mut, remove_local_dict, set_local_dict,
+        spawn_local,
+    };
+    use crate::tests::test_lib::AtomicCounter;
+    use env_logger;
     use std::mem;
     use std::time::Instant;
-    use env_logger;
-    use crate::rt::{spawn_local,
-                    get_local_dict,
-                    get_local_dict_mut,
-                    set_local_dict,
-                    remove_local_dict,
-                    clear_local_dict};
-
     env_logger::init();
 
-    struct AtomicCounter(AtomicUsize, Instant);
-    impl Drop for AtomicCounter {
-        fn drop(&mut self) {
-            unsafe {
-                println!("!!!!!!drop counter, count: {:?}, time: {:?}", self.0.load(Ordering::Relaxed), Instant::now() - self.1);
-            }
-        }
-    }
-
-    let pool = StealableTaskPool::with(8, 8);
-    let builer = MultiTaskRuntimeBuilder::new(pool)
-        .set_timer_interval(1);
+    let pool = StealableTaskPool::with(1, 1);
+    let builer = MultiTaskRuntimeBuilder::new(pool).set_timer_interval(1);
     let rt = builer.build();
     let rt0 = rt.clone();
     let rt1 = rt.clone();
@@ -2110,7 +2172,8 @@ fn test_stealable_runtime() {
     let rt6 = rt.clone();
     let rt7 = rt.clone();
 
-    let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+    let counter = Arc::new(AtomicCounter::new(16000000));
+    let over_state = counter.get_state();
     let count0 = counter.clone();
     let count1 = counter.clone();
     let count2 = counter.clone();
@@ -2125,9 +2188,9 @@ fn test_stealable_runtime() {
         use crate::rt::spawn_local;
 
         if let Err(e) = spawn_local(async move {
-            println!("Test spawn local ok");
+            assert!(true);
         }) {
-            println!("Test spawn local failed, reason: {:?}", e);
+            panic!("Test spawn local failed, reason: {:?}", e);
         }
     });
 
@@ -2135,24 +2198,24 @@ fn test_stealable_runtime() {
     let thread_handle = thread::spawn(move || {
         match rt_copy.block_on(async move {
             set_local_dict::<usize>(0);
-            println!("get local dict, init value: {}", *get_local_dict::<usize>().unwrap());
+            assert_eq!(*get_local_dict::<usize>().unwrap(), 0);
             *get_local_dict_mut::<usize>().unwrap() = 0xffffffff;
-            println!("get local dict, value after modify: {}", *get_local_dict::<usize>().unwrap());
+            assert_eq!(*get_local_dict::<usize>().unwrap(), 0xffffffff);
             if let Some(value) = remove_local_dict::<usize>() {
-                println!("get local dict, value after remove: {:?}, last value: {}", get_local_dict::<usize>(), value);
+                assert_eq!(value, 0xffffffff);
             }
             set_local_dict::<usize>(0);
             clear_local_dict();
-            println!("get local dict, value after clear: {:?}", get_local_dict::<usize>());
+            assert_eq!(get_local_dict::<usize>(), None);
 
             "Test block on ok".to_string()
         }) {
             Err(e) => {
-                println!("Test block on failed, reason: {:?}", e);
-            },
+                panic!("Test block on failed, reason: {:?}", e);
+            }
             Ok(r) => {
-                println!("{}", r);
-            },
+                assert_eq!(r, "Test block on ok".to_string());
+            }
         }
     });
     thread_handle.join();
@@ -2162,12 +2225,11 @@ fn test_stealable_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count0.clone();
             if let Err(e) = rt0.spawn(rt0.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2175,12 +2237,11 @@ fn test_stealable_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count1.clone();
             if let Err(e) = rt1.spawn(rt1.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("!!!> spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2188,12 +2249,11 @@ fn test_stealable_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count2.clone();
             if let Err(e) = rt2.spawn(rt2.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2201,12 +2261,11 @@ fn test_stealable_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count3.clone();
             if let Err(e) = rt3.spawn(rt3.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2214,12 +2273,11 @@ fn test_stealable_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count4.clone();
             if let Err(e) = rt4.spawn(rt4.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2227,12 +2285,11 @@ fn test_stealable_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count5.clone();
             if let Err(e) = rt5.spawn(rt5.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2240,12 +2297,11 @@ fn test_stealable_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count6.clone();
             if let Err(e) = rt6.spawn(rt6.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -2253,26 +2309,18 @@ fn test_stealable_runtime() {
         for _ in 0..2000000 {
             let counter_copy = count7.clone();
             if let Err(e) = rt7.spawn(rt7.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn multi task failed, reason: {:?}", e);
+                panic!("spawn multi task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn multi task ok, time: {:?}", Instant::now() - start);
     });
 
-    thread::sleep(Duration::from_millis(1000000000));
+    loop {
+        if over_state.load(Ordering::Relaxed) {
+            /// 执行完成后退出主程序
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
