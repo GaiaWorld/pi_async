@@ -1,29 +1,39 @@
-use std::thread;
-use std::rc::Rc;
-use std::io::Result;
-use std::future::Future;
 use std::cell::UnsafeCell;
-use std::task::{Context, Poll};
 use std::collections::VecDeque;
-use std::io::{Error, Result as IOResult, ErrorKind};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::future::Future;
+use std::io::Result;
+use std::io::{Error, ErrorKind, Result as IOResult};
+use std::rc::Rc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::task::{Context, Poll};
+use std::thread;
 
-use futures::{task::{ArcWake, waker_ref},
-              future::{FutureExt, LocalBoxFuture},
-              stream::{StreamExt, Stream, LocalBoxStream}};
 use async_stream::stream;
 use crossbeam_channel::bounded;
 use crossbeam_queue::SegQueue;
 use flume::bounded as async_bounded;
+use futures::{
+    future::{FutureExt, LocalBoxFuture},
+    stream::{LocalBoxStream, Stream, StreamExt},
+    task::{waker_ref, ArcWake},
+};
 
-use crate::{lock::spin,
-            rt::{AsyncPipelineResult, alloc_rt_uid,
-                 serial::{AsyncWait, AsyncWaitAny, AsyncWaitAnyCallback, AsyncMapReduce}}};
+use crate::{
+    lock::spin,
+    rt::{
+        alloc_rt_uid,
+        serial::{AsyncMapReduce, AsyncWait, AsyncWaitAny, AsyncWaitAnyCallback},
+        AsyncPipelineResult,
+    },
+};
 
 // 本地异步任务
 pub(crate) struct LocalTask<O: Default + 'static = ()> {
-    inner:      UnsafeCell<Option<LocalBoxFuture<'static, O>>>, //内部本地异步任务
-    runtime:    LocalTaskRuntime<O>,                            //本地异步任务运行时
+    inner: UnsafeCell<Option<LocalBoxFuture<'static, O>>>, //内部本地异步任务
+    runtime: LocalTaskRuntime<O>,                          //本地异步任务运行时
 }
 
 unsafe impl<O: Default + 'static> Send for LocalTask<O> {}
@@ -38,9 +48,7 @@ impl<O: Default + 'static> ArcWake for LocalTask<O> {
 impl<O: Default + 'static> LocalTask<O> {
     // 获取内部本地异步任务
     pub fn get_inner(&self) -> Option<LocalBoxFuture<'static, O>> {
-        unsafe {
-            (&mut *self.inner.get()).take()
-        }
+        unsafe { (&mut *self.inner.get()).take() }
     }
 
     // 设置内部本地异步任务
@@ -54,11 +62,13 @@ impl<O: Default + 'static> LocalTask<O> {
 ///
 /// 本地异步任务运行时
 ///
-pub struct LocalTaskRuntime<O: Default + 'static = ()>(Arc<(
-    usize,                                      //运行时唯一id
-    Arc<AtomicBool>,                            //运行状态
-    SegQueue<Arc<LocalTask<O>>>,                //本地异步任务池
-)>);
+pub struct LocalTaskRuntime<O: Default + 'static = ()>(
+    Arc<(
+        usize,                       //运行时唯一id
+        Arc<AtomicBool>,             //运行状态
+        SegQueue<Arc<LocalTask<O>>>, //本地异步任务池
+    )>,
+);
 
 unsafe impl<O: Default + 'static> Send for LocalTaskRuntime<O> {}
 impl<O: Default + 'static> !Sync for LocalTaskRuntime<O> {}
@@ -83,14 +93,14 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
 
     /// 获取当前异步运行时任务数量
     pub fn len(&self) -> usize {
-        unsafe {
-            (self.0).2.len()
-        }
+        unsafe { (self.0).2.len() }
     }
 
     /// 派发一个指定的异步任务到异步运行时
     pub fn spawn<F>(&self, future: F)
-        where F: Future<Output = O> + 'static {
+    where
+        F: Future<Output = O> + 'static,
+    {
         self.will_wakeup_once(Arc::new(LocalTask {
             inner: UnsafeCell::new(Some(future.boxed_local())),
             runtime: self.clone(),
@@ -99,7 +109,9 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
 
     /// 线程安全的发送一个异步任务到异步运行时
     pub fn send<F>(&self, future: F)
-        where F: Future<Output = O> + 'static {
+    where
+        F: Future<Output = O> + 'static,
+    {
         self.will_wakeup_once(Arc::new(LocalTask {
             inner: UnsafeCell::new(Some(future.boxed_local())),
             runtime: self.clone(),
@@ -108,9 +120,7 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
 
     /// 线程安全的唤醒一个将被唤醒的本地异步任务
     #[inline]
-    pub fn wakeup_once(&self) {
-
-    }
+    pub fn wakeup_once(&self) {}
 
     /// 线程安全的将一个挂起的本地异步任务设置为将被唤醒的本地异步任务
     #[inline]
@@ -146,10 +156,12 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
 
     /// 生成一个异步管道，输入指定流，输入流的每个值通过过滤器生成输出流的值
     pub fn pipeline<S, SO, F, FO>(&self, input: S, mut filter: F) -> LocalBoxStream<'static, FO>
-        where S: Stream<Item = SO> + 'static,
-              SO: 'static,
-              F: FnMut(SO) -> AsyncPipelineResult<FO> + 'static,
-              FO: 'static {
+    where
+        S: Stream<Item = SO> + 'static,
+        SO: 'static,
+        F: FnMut(SO) -> AsyncPipelineResult<FO> + 'static,
+        FO: 'static,
+    {
         let output = stream! {
             for await value in input {
                 match filter(value) {
@@ -167,9 +179,11 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
         output.boxed_local()
     }
 
-    fn block_on<F>(&self, future: F) -> IOResult<F::Output>
-        where F: Future + 'static,
-              <F as Future>::Output: Default + 'static {
+    pub fn block_on<F>(&self, future: F) -> IOResult<F::Output>
+    where
+        F: Future + 'static,
+        <F as Future>::Output: Default + 'static,
+    {
         let (sender, receiver) = bounded(1);
         self.spawn(async move {
             //在指定运行时中执行，并返回结果
@@ -209,13 +223,16 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
                 Err(e) => {
                     if e.is_disconnected() {
                         //通道已关闭，则立即返回错误原因
-                        return Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)));
+                        return Err(Error::new(
+                            ErrorKind::Other,
+                            format!("Block on failed, reason: {:?}", e),
+                        ));
                     }
-                },
+                }
                 Ok(result) => {
                     //异步任务已完成，则立即返回执行结果
-                    return Ok(result)
-                },
+                    return Ok(result);
+                }
             }
         }
     }
@@ -223,20 +240,22 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
     /// 关闭异步运行时，返回请求关闭是否成功
     pub fn close(self) -> bool {
         if cfg!(target_arch = "aarch64") {
-            if let Ok(true) = (self.0).1.compare_exchange(true,
-                                                          false,
-                                                          Ordering::SeqCst,
-                                                          Ordering::SeqCst) {
+            if let Ok(true) =
+                (self.0)
+                    .1
+                    .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            {
                 //设置运行状态成功
                 true
             } else {
                 false
             }
         } else {
-            if let Ok(true) = (self.0).1.compare_exchange_weak(true,
-                                                               false,
-                                                               Ordering::SeqCst,
-                                                               Ordering::SeqCst) {
+            if let Ok(true) =
+                (self.0)
+                    .1
+                    .compare_exchange_weak(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            {
                 //设置运行状态成功
                 true
             } else {
@@ -258,9 +277,9 @@ impl<O: Default + 'static> LocalTaskRunner<O> {
     /// 构建本地异步任务执行器
     pub fn new() -> Self {
         let inner = (
-                alloc_rt_uid(),
-                Arc::new(AtomicBool::new(false)),
-                SegQueue::new(),
+            alloc_rt_uid(),
+            Arc::new(AtomicBool::new(false)),
+            SegQueue::new(),
         );
 
         LocalTaskRunner(LocalTaskRuntime(Arc::new(inner)))
@@ -272,9 +291,7 @@ impl<O: Default + 'static> LocalTaskRunner<O> {
     }
 
     /// 启动工作者异步任务执行器
-    pub fn startup(self,
-                   thread_name: &str,
-                   thread_stack_size: usize) -> LocalTaskRuntime<O> {
+    pub fn startup(self, thread_name: &str, thread_stack_size: usize) -> LocalTaskRuntime<O> {
         let rt = self.get_runtime();
         let rt_copy = rt.clone();
         thread::Builder::new()
@@ -318,28 +335,13 @@ impl<O: Default + 'static> LocalTaskRunner<O> {
 
 #[test]
 fn test_local_runtime_block_on() {
-    use std::time::Instant;
-    use std::ops::Drop;
-    use std::sync::atomic::AtomicUsize;
-
-    struct AtomicCounter(AtomicUsize, Instant);
-    impl Drop for AtomicCounter {
-        fn drop(&mut self) {
-            unsafe {
-                println!("!!!!!!drop counter, count: {:?}, time: {:?}", self.0.load(Ordering::Relaxed), Instant::now() - self.1);
-            }
-        }
-    }
+    use crate::tests::test_lib::AtomicCounter;
 
     let rt = LocalTaskRunner::<()>::new().into_local();
 
-    let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
-    let start = Instant::now();
+    let counter = Arc::new(AtomicCounter::new(10000000));
     for _ in 0..10000000 {
         let counter_copy = counter.clone();
-        let _ = rt.block_on(async move {
-            counter_copy.0.fetch_add(1, Ordering::Relaxed)
-        });
+        let _ = rt.block_on(async move { counter_copy.fetch_add(1) });
     }
-    println!("!!!!!!spawn local task ok, time: {:?}", Instant::now() - start);
 }

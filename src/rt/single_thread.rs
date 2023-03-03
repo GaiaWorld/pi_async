@@ -785,7 +785,6 @@ fn test_single_runtime() {
     use std::mem;
     use std::thread;
     use std::time::{Duration, Instant};
-    let over_state: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let rt_uid = alloc_rt_uid();
     let (producer, consumer) = mpsc_deque();
     let consume_count = Arc::new(AtomicUsize::new(0));

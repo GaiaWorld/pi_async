@@ -2,54 +2,53 @@
 //!
 
 use std::any::Any;
-use std::vec::IntoIter;
 use std::cell::RefCell;
-use std::future::Future;
-use std::mem::transmute;
 use std::cell::UnsafeCell;
-use std::sync::{Arc, Weak};
-use std::task::{Waker, Context, Poll};
-use std::io::{Error, Result, ErrorKind};
+use std::future::Future;
+use std::io::{Error, ErrorKind, Result};
+use std::mem::transmute;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::task::{Context, Poll, Waker};
+use std::vec::IntoIter;
 
-use parking_lot::{Mutex, Condvar};
-use crossbeam_channel::{Sender, bounded, unbounded};
-use flume::bounded as async_bounded;
-use futures::{future::{FutureExt, LocalBoxFuture},
-              stream::{Stream, StreamExt, LocalBoxStream},
-              task::{ArcWake, waker_ref}};
 use async_stream::stream;
+use crossbeam_channel::{bounded, unbounded, Sender};
+use flume::bounded as async_bounded;
+use futures::{
+    future::{FutureExt, LocalBoxFuture},
+    stream::{LocalBoxStream, Stream, StreamExt},
+    task::{waker_ref, ArcWake},
+};
+use parking_lot::{Condvar, Mutex};
 
-use crate::{lock::{spin,
-                   mpsc_deque::{Sender as MpscSent, Receiver as MpscRecv, mpsc_deque}},
-            rt::{TaskId, AsyncPipelineResult, alloc_rt_uid,
-                 serial::{AsyncRuntime,
-                          AsyncRuntimeExt,
-                          AsyncTaskPool,
-                          AsyncTaskPoolExt,
-                          AsyncTask,
-                          AsyncTaskTimer,
-                          AsyncWaitTimeout,
-                          AsyncWaitResult,
-                          AsyncTimingTask,
-                          AsyncWait,
-                          AsyncWaitAny,
-                          AsyncWaitAnyCallback,
-                          AsyncMapReduce,
-                          LocalAsyncRuntime,
-                          bind_local_thread,
-                          local_async_runtime}}};
+use crate::{
+    lock::{
+        mpsc_deque::{mpsc_deque, Receiver as MpscRecv, Sender as MpscSent},
+        spin,
+    },
+    rt::{
+        alloc_rt_uid,
+        serial::{
+            bind_local_thread, local_async_runtime, AsyncMapReduce, AsyncRuntime, AsyncRuntimeExt,
+            AsyncTask, AsyncTaskPool, AsyncTaskPoolExt, AsyncTaskTimer, AsyncTimingTask, AsyncWait,
+            AsyncWaitAny, AsyncWaitAnyCallback, AsyncWaitResult, AsyncWaitTimeout,
+            LocalAsyncRuntime,
+        },
+        AsyncPipelineResult, TaskId,
+    },
+};
 
 ///
 /// 单线程任务池
 ///
 pub struct SingleTaskPool<O: Default + 'static> {
-    id:             usize,                                                          //绑定的线程唯一id
-    consumer:       Arc<RefCell<MpscRecv<Arc<AsyncTask<SingleTaskPool<O>, O>>>>>,   //任务消费者
-    producer:       Arc<MpscSent<Arc<AsyncTask<SingleTaskPool<O>, O>>>>,            //任务生产者
-    consume_count:  Arc<AtomicUsize>,                                               //任务消费计数
-    produce_count:  Arc<AtomicUsize>,                                               //任务生产计数
-    thread_waker:   Option<Arc<(AtomicBool, Mutex<()>, Condvar)>>,                  //绑定线程的唤醒器
+    id: usize,                                                              //绑定的线程唯一id
+    consumer: Arc<RefCell<MpscRecv<Arc<AsyncTask<SingleTaskPool<O>, O>>>>>, //任务消费者
+    producer: Arc<MpscSent<Arc<AsyncTask<SingleTaskPool<O>, O>>>>,          //任务生产者
+    consume_count: Arc<AtomicUsize>,                                        //任务消费计数
+    produce_count: Arc<AtomicUsize>,                                        //任务生产计数
+    thread_waker: Option<Arc<(AtomicBool, Mutex<()>, Condvar)>>,            //绑定线程的唤醒器
 }
 
 unsafe impl<O: Default + 'static> Send for SingleTaskPool<O> {}
@@ -81,7 +80,11 @@ impl<O: Default + 'static> Default for SingleTaskPool<O> {
             producer: Arc::new(producer),
             consume_count,
             produce_count,
-            thread_waker: Some(Arc::new((AtomicBool::new(false), Mutex::new(()), Condvar::new()))),
+            thread_waker: Some(Arc::new((
+                AtomicBool::new(false),
+                Mutex::new(()),
+                Condvar::new(),
+            ))),
         }
     }
 }
@@ -99,7 +102,8 @@ impl<O: Default + 'static> AsyncTaskPool<O> for SingleTaskPool<O> {
         if let Some(len) = self
             .produce_count
             .load(Ordering::Relaxed)
-            .checked_sub(self.consume_count.load(Ordering::Relaxed)) {
+            .checked_sub(self.consume_count.load(Ordering::Relaxed))
+        {
             len
         } else {
             0
@@ -159,35 +163,35 @@ impl<O: Default + 'static> AsyncTaskPoolExt<O> for SingleTaskPool<O> {
 pub struct SingleTaskRuntime<
     O: Default + 'static = (),
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = SingleTaskPool<O>,
->(Arc<(
-    usize,                                  //运行时唯一id
-    Arc<P>,                                 //异步任务池
-    Sender<(usize, AsyncTimingTask<P, O>)>, //休眠的异步任务生产者
-    Mutex<AsyncTaskTimer<P, O>>,            //本地定时器
-)>);
+>(
+    Arc<(
+        usize,                                  //运行时唯一id
+        Arc<P>,                                 //异步任务池
+        Sender<(usize, AsyncTimingTask<P, O>)>, //休眠的异步任务生产者
+        Mutex<AsyncTaskTimer<P, O>>,            //本地定时器
+    )>,
+);
 
-unsafe impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-> Send for SingleTaskRuntime<O, P> {}
-unsafe impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-> Sync for SingleTaskRuntime<O, P> {}
+unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Send
+    for SingleTaskRuntime<O, P>
+{
+}
+unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Sync
+    for SingleTaskRuntime<O, P>
+{
+}
 
-impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-> Clone for SingleTaskRuntime<O, P> {
+impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Clone
+    for SingleTaskRuntime<O, P>
+{
     fn clone(&self) -> Self {
         SingleTaskRuntime(self.0.clone())
     }
 }
 
-impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-> AsyncRuntime<O> for SingleTaskRuntime<O, P> {
+impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> AsyncRuntime<O>
+    for SingleTaskRuntime<O, P>
+{
     type Pool = P;
 
     /// 共享运行时内部任务池
@@ -217,10 +221,14 @@ impl<
 
     /// 派发一个指定的异步任务到异步运行时
     fn spawn<F>(&self, task_id: TaskId, future: F) -> Result<()>
-        where F: Future<Output = O> + 'static {
-        if let Err(e) = (self.0)
-            .1
-            .push(Arc::new(AsyncTask::new(task_id, (self.0).1.clone(), Some(future.boxed_local())))) {
+    where
+        F: Future<Output = O> + 'static,
+    {
+        if let Err(e) = (self.0).1.push(Arc::new(AsyncTask::new(
+            task_id,
+            (self.0).1.clone(),
+            Some(future.boxed_local()),
+        ))) {
             return Err(Error::new(ErrorKind::Other, e));
         }
 
@@ -229,15 +237,26 @@ impl<
 
     /// 派发一个在指定时间后执行的异步任务到异步运行时，时间单位ms
     fn spawn_timing<F>(&self, task_id: TaskId, future: F, time: usize) -> Result<()>
-        where F: Future<Output = O> + 'static {
-        (self.0).3.lock().set_timer(AsyncTimingTask::WaitRun(Arc::new(AsyncTask::new(task_id.clone(), (self.0).1.clone(), Some(future.boxed_local())))), time);
+    where
+        F: Future<Output = O> + 'static,
+    {
+        (self.0).3.lock().set_timer(
+            AsyncTimingTask::WaitRun(Arc::new(AsyncTask::new(
+                task_id.clone(),
+                (self.0).1.clone(),
+                Some(future.boxed_local()),
+            ))),
+            time,
+        );
 
         Ok(())
     }
 
     /// 挂起指定唯一id的异步任务
     fn pending<Output>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output> {
-        task_id.0.store(Box::into_raw(Box::new(waker)) as usize, Ordering::Relaxed);
+        task_id
+            .0
+            .store(Box::into_raw(Box::new(waker)) as usize, Ordering::Relaxed);
         Poll::Pending
     }
 
@@ -245,11 +264,9 @@ impl<
     fn wakeup(&self, task_id: &TaskId) {
         match task_id.0.load(Ordering::Relaxed) {
             0 => panic!("Single runtime wakeup task failed, reason: task id not exist"),
-            ptr => {
-                unsafe {
-                    let waker = Box::from_raw(ptr as *mut Waker);
-                    waker.wake();
-                }
+            ptr => unsafe {
+                let waker = Box::from_raw(ptr as *mut Waker);
+                waker.wake();
             },
         }
     }
@@ -285,18 +302,17 @@ impl<
         let rt = self.clone();
         let producor = (self.0).2.clone();
 
-        AsyncWaitTimeout::new(rt,
-                              producor,
-                              timeout)
-            .boxed_local()
+        AsyncWaitTimeout::new(rt, producor, timeout).boxed_local()
     }
 
     /// 生成一个异步管道，输入指定流，输入流的每个值通过过滤器生成输出流的值
     fn pipeline<S, SO, F, FO>(&self, input: S, mut filter: F) -> LocalBoxStream<'static, FO>
-        where S: Stream<Item = SO> + 'static,
-              SO: 'static,
-              F: FnMut(SO) -> AsyncPipelineResult<FO> + 'static,
-              FO: 'static {
+    where
+        S: Stream<Item = SO> + 'static,
+        SO: 'static,
+        F: FnMut(SO) -> AsyncPipelineResult<FO> + 'static,
+        FO: 'static,
+    {
         let output = stream! {
             for await value in input {
                 match filter(value) {
@@ -320,49 +336,55 @@ impl<
     }
 }
 
-impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-> AsyncRuntimeExt<O> for SingleTaskRuntime<O, P> {
-    fn spawn_with_context<F, C>(&self,
-                                task_id: TaskId,
-                                future: F,
-                                context: C) -> Result<()>
-        where F: Future<Output = O> + 'static,
-              C: 'static {
-        if let Err(e) = (self.0)
-            .1
-            .push(Arc::new(AsyncTask::with_context(task_id,
-                                                   (self.0).1.clone(),
-                                                   Some(future.boxed_local()),
-                                                   context))) {
+impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> AsyncRuntimeExt<O>
+    for SingleTaskRuntime<O, P>
+{
+    fn spawn_with_context<F, C>(&self, task_id: TaskId, future: F, context: C) -> Result<()>
+    where
+        F: Future<Output = O> + 'static,
+        C: 'static,
+    {
+        if let Err(e) = (self.0).1.push(Arc::new(AsyncTask::with_context(
+            task_id,
+            (self.0).1.clone(),
+            Some(future.boxed_local()),
+            context,
+        ))) {
             return Err(Error::new(ErrorKind::Other, e));
         }
 
         Ok(())
     }
 
-    fn spawn_timing_with_context<F, C>(&self,
-                                       task_id: TaskId,
-                                       future: F,
-                                       context: C,
-                                       time: usize) -> Result<()>
-        where F: Future<Output = O> + 'static,
-              C: 'static {
-        (self.0)
-            .3
-            .lock()
-            .set_timer(AsyncTimingTask::WaitRun(Arc::new(AsyncTask::with_context(task_id.clone(),
-                                                                                 (self.0).1.clone(),
-                                                                                 Some(future.boxed_local()),
-                                                                                 context))), time);
+    fn spawn_timing_with_context<F, C>(
+        &self,
+        task_id: TaskId,
+        future: F,
+        context: C,
+        time: usize,
+    ) -> Result<()>
+    where
+        F: Future<Output = O> + 'static,
+        C: 'static,
+    {
+        (self.0).3.lock().set_timer(
+            AsyncTimingTask::WaitRun(Arc::new(AsyncTask::with_context(
+                task_id.clone(),
+                (self.0).1.clone(),
+                Some(future.boxed_local()),
+                context,
+            ))),
+            time,
+        );
 
         Ok(())
     }
 
     fn block_on<F>(&self, future: F) -> Result<F::Output>
-        where F: Future + 'static,
-              <F as Future>::Output: Default + 'static {
+    where
+        F: Future + 'static,
+        <F as Future>::Output: Default + 'static,
+    {
         let (sender, receiver) = bounded(1);
         if let Err(e) = self.spawn(self.alloc(), async move {
             //在指定运行时中执行，并返回结果
@@ -371,7 +393,10 @@ impl<
 
             Default::default()
         }) {
-            return Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)));
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("Block on failed, reason: {:?}", e),
+            ));
         }
 
         let mut count = 0;
@@ -398,14 +423,14 @@ impl<
                                 if let Some(task) = (self.0).1.try_pop() {
                                     run_task(task);
                                 }
-                            },
+                            }
                             AsyncTimingTask::WaitRun(expired) => {
                                 //立即执行到期的定时异步任务，并立即执行
                                 (self.0).1.push_timed_out(handle as u64, expired);
                                 if let Some(task) = (self.0).1.try_pop() {
                                     run_task(task);
                                 }
-                            },
+                            }
                         }
                     }
                 } else {
@@ -424,22 +449,24 @@ impl<
                 Err(e) => {
                     if e.is_disconnected() {
                         //通道已关闭，则立即返回错误原因
-                        return Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)));
+                        return Err(Error::new(
+                            ErrorKind::Other,
+                            format!("Block on failed, reason: {:?}", e),
+                        ));
                     }
-                },
+                }
                 Ok(result) => {
                     //异步任务已完成，则立即返回执行结果
-                    return Ok(result)
-                },
+                    return Ok(result);
+                }
             }
         }
     }
 }
 
-impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-> SingleTaskRuntime<O, P> {
+impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
+    SingleTaskRuntime<O, P>
+{
     /// 获取当前单线程异步运行时的本地异步运行时
     pub fn to_local_runtime(&self) -> LocalAsyncRuntime<O> {
         LocalAsyncRuntime::new(
@@ -447,7 +474,7 @@ impl<
             SingleTaskRuntime::<O, P>::get_id_raw,
             SingleTaskRuntime::<O, P>::spawn_raw,
             SingleTaskRuntime::<O, P>::spawn_timing_raw,
-            SingleTaskRuntime::<O, P>::timeout_raw
+            SingleTaskRuntime::<O, P>::timeout_raw,
         )
     }
 
@@ -461,12 +488,14 @@ impl<
     #[inline]
     pub(crate) fn from_raw(raw: *const ()) -> Self {
         let inner = unsafe {
-            Arc::from_raw(raw as *const (
-                usize,
-                Arc<P>,
-                Sender<(usize, AsyncTimingTask<P, O>)>,
-                Mutex<AsyncTaskTimer<P, O>>,
-            ))
+            Arc::from_raw(
+                raw as *const (
+                    usize,
+                    Arc<P>,
+                    Sender<(usize, AsyncTimingTask<P, O>)>,
+                    Mutex<AsyncTaskTimer<P, O>>,
+                ),
+            )
         };
         SingleTaskRuntime(inner)
     }
@@ -480,8 +509,7 @@ impl<
     }
 
     // 派发一个指定的异步任务到异步运行时
-    pub(crate) fn spawn_raw(raw: *const (),
-                            future: LocalBoxFuture<'static, O>) -> Result<()> {
+    pub(crate) fn spawn_raw(raw: *const (), future: LocalBoxFuture<'static, O>) -> Result<()> {
         let rt = SingleTaskRuntime::<O, P>::from_raw(raw);
         let result = rt.spawn(rt.alloc(), future);
         Arc::into_raw(rt.0); //避免提前释放
@@ -489,9 +517,11 @@ impl<
     }
 
     // 定时派发一个指定的异步任务到异步运行时
-    pub(crate) fn spawn_timing_raw(raw: *const (),
-                                   future: LocalBoxFuture<'static, O>,
-                                   timeout: usize) -> Result<()> {
+    pub(crate) fn spawn_timing_raw(
+        raw: *const (),
+        future: LocalBoxFuture<'static, O>,
+        timeout: usize,
+    ) -> Result<()> {
         let rt = SingleTaskRuntime::<O, P>::from_raw(raw);
         let result = rt.spawn_timing(rt.alloc(), future, timeout);
         Arc::into_raw(rt.0); //避免提前释放
@@ -499,8 +529,7 @@ impl<
     }
 
     // 挂起当前异步运行时的当前任务，等待指定的时间后唤醒当前任务
-    pub(crate) fn timeout_raw(raw: *const (),
-                              timeout: usize) -> LocalBoxFuture<'static, ()> {
+    pub(crate) fn timeout_raw(raw: *const (), timeout: usize) -> LocalBoxFuture<'static, ()> {
         let rt = SingleTaskRuntime::<O, P>::from_raw(raw);
         let boxed = rt.timeout(timeout);
         Arc::into_raw(rt.0); //避免提前释放
@@ -513,20 +542,20 @@ impl<
 ///
 pub struct SingleTaskRunner<
     O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = SingleTaskPool<O>
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = SingleTaskPool<O>,
 > {
-    is_running: AtomicBool,                 //是否开始运行
-    runtime:    SingleTaskRuntime<O, P>,    //异步单线程任务运行时
+    is_running: AtomicBool,           //是否开始运行
+    runtime: SingleTaskRuntime<O, P>, //异步单线程任务运行时
 }
 
-unsafe impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-> Send for SingleTaskRunner<O, P> {}
-unsafe impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-> Sync for SingleTaskRunner<O, P> {}
+unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Send
+    for SingleTaskRunner<O, P>
+{
+}
+unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Sync
+    for SingleTaskRunner<O, P>
+{
+}
 
 impl<O: Default + 'static> Default for SingleTaskRunner<O> {
     fn default() -> Self {
@@ -534,10 +563,9 @@ impl<O: Default + 'static> Default for SingleTaskRunner<O> {
     }
 }
 
-impl<
-    O: Default + 'static,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-> SingleTaskRunner<O, P> {
+impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
+    SingleTaskRunner<O, P>
+{
     /// 用指定的任务池构建单线程异步运行时
     pub fn new(pool: P) -> Self {
         let rt_uid = pool.get_thread_id();
@@ -549,12 +577,7 @@ impl<
         let timer = Mutex::new(timer);
 
         //构建单线程任务运行时
-        let runtime = SingleTaskRuntime(Arc::new((
-            rt_uid,
-            pool,
-            producor,
-            timer,
-        )));
+        let runtime = SingleTaskRuntime(Arc::new((rt_uid, pool, producor, timer)));
 
         SingleTaskRunner {
             is_running: AtomicBool::new(false),
@@ -572,10 +595,8 @@ impl<
         if cfg!(target_arch = "aarch64") {
             match self
                 .is_running
-                .compare_exchange(false,
-                                  true,
-                                  Ordering::SeqCst,
-                                  Ordering::SeqCst) {
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            {
                 Ok(false) => {
                     //未启动，则启动，并返回单线程异步运行时
                     Some(self.runtime.clone())
@@ -586,12 +607,12 @@ impl<
                 }
             }
         } else {
-            match self
-                .is_running
-                .compare_exchange_weak(false,
-                                       true,
-                                       Ordering::SeqCst,
-                                       Ordering::SeqCst) {
+            match self.is_running.compare_exchange_weak(
+                false,
+                true,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
                 Ok(false) => {
                     //未启动，则启动，并返回单线程异步运行时
                     Some(self.runtime.clone())
@@ -608,7 +629,10 @@ impl<
     pub fn run_once(&self) -> Result<usize> {
         if !self.is_running.load(Ordering::Relaxed) {
             //未启动，则返回错误原因
-            return Err(Error::new(ErrorKind::Other, "Single thread runtime not running"));
+            return Err(Error::new(
+                ErrorKind::Other,
+                "Single thread runtime not running",
+            ));
         }
 
         //设置新的定时任务，并唤醒已过期的定时任务
@@ -626,14 +650,14 @@ impl<
                             if let Some(task) = (self.runtime.0).1.try_pop() {
                                 run_task(task);
                             }
-                        },
+                        }
                         AsyncTimingTask::WaitRun(expired) => {
                             //立即执行到期的定时异步任务，并立即执行
                             (self.runtime.0).1.push_timed_out(handle as u64, expired);
                             if let Some(task) = (self.runtime.0).1.try_pop() {
                                 run_task(task);
                             }
-                        },
+                        }
                     }
                 }
             } else {
@@ -647,10 +671,10 @@ impl<
             None => {
                 //当前没有异步任务，则立即返回
                 return Ok(0);
-            },
+            }
             Some(task) => {
                 run_task(task);
-            },
+            }
         }
 
         Ok((self.runtime.0).1.len())
@@ -660,7 +684,10 @@ impl<
     pub fn run(&self) -> Result<usize> {
         if !self.is_running.load(Ordering::Relaxed) {
             //未启动，则返回错误原因
-            return Err(Error::new(ErrorKind::Other, "Single thread runtime not running"));
+            return Err(Error::new(
+                ErrorKind::Other,
+                "Single thread runtime not running",
+            ));
         }
 
         //获取当前任务池中的所有异步任务
@@ -682,14 +709,14 @@ impl<
                                 if let Some(task) = (self.runtime.0).1.try_pop() {
                                     run_task(task);
                                 }
-                            },
+                            }
                             AsyncTimingTask::WaitRun(expired) => {
                                 //立即执行到期的定时异步任务，并立即执行
                                 (self.runtime.0).1.push_timed_out(handle as u64, expired);
                                 if let Some(task) = (self.runtime.0).1.try_pop() {
                                     run_task(task);
                                 }
-                            },
+                            }
                         }
 
                         if let Some(task) = tasks.next() {
@@ -726,7 +753,9 @@ impl<
 
 //执行异步任务
 #[inline]
-fn run_task<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>(task: Arc<AsyncTask<P, O>>) {
+fn run_task<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>(
+    task: Arc<AsyncTask<P, O>>,
+) {
     let waker = waker_ref(&task);
     let mut context = Context::from_waker(&*waker);
     if let Some(mut future) = task.get_inner() {
@@ -739,24 +768,14 @@ fn run_task<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool
 
 #[test]
 fn test_single_runtime() {
+    use crate::rt::{
+        clear_local_dict, get_local_dict, get_local_dict_mut, remove_local_dict, set_local_dict,
+        spawn_local,
+    };
+    use crate::tests::test_lib::AtomicCounter;
     use std::mem;
     use std::thread;
     use std::time::{Duration, Instant};
-    use crate::rt::{spawn_local,
-                    get_local_dict,
-                    get_local_dict_mut,
-                    set_local_dict,
-                    remove_local_dict,
-                    clear_local_dict};
-
-    struct AtomicCounter(AtomicUsize, Instant);
-    impl Drop for AtomicCounter {
-        fn drop(&mut self) {
-            unsafe {
-                println!("!!!!!!drop counter, count: {:?}, time: {:?}", self.0.load(Ordering::Relaxed), Instant::now() - self.1);
-            }
-        }
-    }
 
     let rt_uid = alloc_rt_uid();
     let (producer, consumer) = mpsc_deque();
@@ -780,12 +799,18 @@ fn test_single_runtime() {
     let rt3 = rt.clone();
 
     let rt_copy = rt.clone();
-    thread::spawn(move || {
+    let counter = Arc::new(AtomicCounter::new(10000000));
+    let over_state = counter.get_state();
+    let main_thread = thread::spawn(move || {
         bind_local_thread(rt_copy.to_local_runtime());
 
         loop {
             if let Err(e) = runner.run() {
-                println!("!!!!!!run failed, reason: {:?}", e);
+                panic!("run failed, reason: {:?}", e);
+                break;
+            }
+            if over_state.load(Ordering::Relaxed) {
+                /// 执行完成后退出主程序
                 break;
             }
             thread::sleep(Duration::from_millis(1));
@@ -794,9 +819,9 @@ fn test_single_runtime() {
 
     rt.spawn(rt.alloc(), async move {
         if let Err(e) = spawn_local(async move {
-            println!("Test spawn local ok");
+            assert!(true);
         }) {
-            println!("Test spawn local failed, reason: {:?}", e);
+            panic!("Test spawn local failed, reason: {:?}", e);
         }
     });
 
@@ -804,29 +829,28 @@ fn test_single_runtime() {
     let thread_handle = thread::spawn(move || {
         match rt_copy.block_on(async move {
             set_local_dict::<usize>(0);
-            println!("get local dict, init value: {}", *get_local_dict::<usize>().unwrap());
+            assert_eq!(*get_local_dict::<usize>().unwrap(), 0);
             *get_local_dict_mut::<usize>().unwrap() = 0xffffffff;
-            println!("get local dict, value after modify: {}", *get_local_dict::<usize>().unwrap());
+            assert_eq!(*get_local_dict::<usize>().unwrap(), 0xffffffff);
             if let Some(value) = remove_local_dict::<usize>() {
-                println!("get local dict, value after remove: {:?}, last value: {}", get_local_dict::<usize>(), value);
+                assert_eq!(value, 0xffffffff);
             }
             set_local_dict::<usize>(0);
             clear_local_dict();
-            println!("get local dict, value after clear: {:?}", get_local_dict::<usize>());
+            assert_eq!(get_local_dict::<usize>(), None);
 
             "Test block on ok".to_string()
         }) {
             Err(e) => {
-                println!("Test block on failed, reason: {:?}", e);
-            },
+                panic!("Test block on failed, reason: {:?}", e);
+            }
             Ok(r) => {
-                println!("{}", r);
-            },
+                assert_eq!(r, "Test block on ok".to_string());
+            }
         }
     });
     thread_handle.join();
 
-    let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
     let counter0 = counter.clone();
     let counter1 = counter.clone();
     let counter2 = counter.clone();
@@ -838,12 +862,11 @@ fn test_single_runtime() {
         for _ in 0..2500000 {
             let counter_copy = counter0.clone();
             if let Err(e) = rt0.spawn(rt0.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn singale task failed, reason: {:?}", e);
+                panic!("spawn singale task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn single task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -851,12 +874,11 @@ fn test_single_runtime() {
         for _ in 0..2500000 {
             let counter_copy = counter1.clone();
             if let Err(e) = rt1.spawn(rt1.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn singale task failed, reason: {:?}", e);
+                panic!("spawn singale task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn single task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -864,12 +886,11 @@ fn test_single_runtime() {
         for _ in 0..2500000 {
             let counter_copy = counter2.clone();
             if let Err(e) = rt2.spawn(rt2.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn singale task failed, reason: {:?}", e);
+                panic!("spawn singale task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn single task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::spawn(move || {
@@ -877,50 +898,31 @@ fn test_single_runtime() {
         for _ in 0..2500000 {
             let counter_copy = counter3.clone();
             if let Err(e) = rt3.spawn(rt3.alloc(), async move {
-                counter_copy.0.fetch_add(1, Ordering::Relaxed);
+                counter_copy.fetch_add(1);
             }) {
-                println!("!!!> spawn singale task failed, reason: {:?}", e);
+                panic!("spawn singale task failed, reason: {:?}", e);
             }
         }
-        println!("!!!!!!spawn single task ok, time: {:?}", Instant::now() - start);
     });
-
-    thread::sleep(Duration::from_millis(1000000000));
+    main_thread.join().unwrap();
 }
 
 #[test]
 pub fn test_single_runtime_block_on() {
-    use std::time::Instant;
     use std::ops::Drop;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
 
     use crate::rt::serial::AsyncRuntimeExt;
-
-    struct AtomicCounter(AtomicUsize, Instant);
-    impl Drop for AtomicCounter {
-        fn drop(&mut self) {
-            unsafe {
-                println!("!!!!!!drop counter, count: {:?}, time: {:?}", self.0.load(Ordering::Relaxed), Instant::now() - self.1);
-            }
-        }
-    }
+    use crate::tests::test_lib::AtomicCounter;
 
     let pool = SingleTaskPool::default();
     let rt = SingleTaskRunner::<(), SingleTaskPool<()>>::new(pool).into_local();
 
-    let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
+    let counter = Arc::new(AtomicCounter::new(10000000));
     let start = Instant::now();
     for _ in 0..10000000 {
         let counter_copy = counter.clone();
-        rt.block_on(async move {
-            counter_copy.0.fetch_add(1, Ordering::Relaxed)
-        });
+        rt.block_on(async move { counter_copy.fetch_add(1) });
     }
-    println!("!!!!!!spawn single task ok, time: {:?}", Instant::now() - start);
 }
-
-
-
-
-
-
