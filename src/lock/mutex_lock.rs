@@ -1,13 +1,13 @@
 //! # 通用异步互斥锁，不支持重入
 //!
 
-use std::pin::Pin;
-use std::sync::Arc;
-use std::future::Future;
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::ops::{Deref, DerefMut};
-use std::task::{Waker, Context, Poll};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 
 use super::spin_lock::SpinLock;
 
@@ -15,24 +15,20 @@ use super::spin_lock::SpinLock;
 /// 异步互斥锁守护者
 ///
 pub struct MutexGuard<T> {
-    guarder:  Arc<InnerMutex<T>>,  //内部锁
+    guarder: Arc<InnerMutex<T>>, //内部锁
 }
 
 impl<T> Deref for MutexGuard<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe {
-            &*self.guarder.inner.get()
-        }
+        unsafe { &*self.guarder.inner.get() }
     }
 }
 
 impl<T> DerefMut for MutexGuard<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            &mut *self.guarder.inner.get()
-        }
+        unsafe { &mut *self.guarder.inner.get() }
     }
 }
 
@@ -54,7 +50,7 @@ impl<T> Drop for MutexGuard<T> {
 /// 异步互斥锁，支持临界区内执行异步任务等待，不支持重入
 ///
 pub struct Mutex<T> {
-    inner:  Arc<InnerMutex<T>>,  //内部锁
+    inner: Arc<InnerMutex<T>>, //内部锁
 }
 
 unsafe impl<T> Send for Mutex<T> {}
@@ -71,9 +67,7 @@ impl<T> Mutex<T> {
             inner: UnsafeCell::new(v),
         });
 
-        Mutex {
-            inner,
-        }
+        Mutex { inner }
     }
 }
 
@@ -83,9 +77,7 @@ impl<T> Mutex<T> {
 impl<T> Mutex<T> {
     /// 获取异步互斥锁
     pub async fn lock(&self) -> MutexGuard<T> {
-        FutureMutex {
-            inner: self.inner.clone(),
-        }.await
+        FutureMutex { inner: self.inner.clone() }.await
     }
 }
 
@@ -93,8 +85,8 @@ impl<T> Mutex<T> {
 * 内部异步互斥锁
 */
 struct InnerMutex<T> {
-    status:         SpinLock<(bool, VecDeque<Waker>)>,  //异步互斥锁状态
-    inner:          UnsafeCell<T>,                      //异步互斥锁内容
+    status: SpinLock<(bool, VecDeque<Waker>)>, //异步互斥锁状态
+    inner: UnsafeCell<T>,                      //异步互斥锁内容
 }
 
 unsafe impl<T> Send for InnerMutex<T> {}
@@ -104,7 +96,7 @@ unsafe impl<T> Sync for InnerMutex<T> {}
 * 互斥锁异步任务
 */
 struct FutureMutex<T> {
-    inner:  Arc<InnerMutex<T>>,  //内部锁
+    inner: Arc<InnerMutex<T>>, //内部锁
 }
 
 impl<T> Future for FutureMutex<T> {
@@ -116,9 +108,7 @@ impl<T> Future for FutureMutex<T> {
         if status.0 {
             //获取异步互斥锁成功，则返回异步互斥锁守护者
             (&mut status).0 = false;
-            return Poll::Ready(MutexGuard {
-                guarder: (&self).inner.clone()
-            });
+            return Poll::Ready(MutexGuard { guarder: (&self).inner.clone() });
         }
 
         //尝试获取异步互斥锁失败，则加入锁等待队列

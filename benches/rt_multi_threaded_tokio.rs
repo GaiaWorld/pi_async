@@ -143,9 +143,5 @@ fn chained_spawn(b: &mut Bencher) {
 }
 
 fn rt() -> Runtime {
-    runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .unwrap()
+    runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap()
 }

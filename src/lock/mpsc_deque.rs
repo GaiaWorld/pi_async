@@ -1,19 +1,19 @@
 //! # 多生产者单消费者的单端队列
 //!
 
-use std::sync::Arc;
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 use super::spin;
 
 /*
 * 锁状态
 */
-const UNLOCK_EMPTY: u8 = 0;     //无锁无任务
+const UNLOCK_EMPTY: u8 = 0; //无锁无任务
 const UNLOCK_NON_EMPTY: u8 = 1; //无锁有任务
-const LOCKED: u8 = 2;           //有锁
+const LOCKED: u8 = 2; //有锁
 
 ///
 /// 构建MPSC的双端队列，并返回发送者和接收者
@@ -23,34 +23,26 @@ pub fn mpsc_deque<T: 'static>() -> (Sender<T>, Receiver<T>) {
         buf_status: AtomicU8::new(UNLOCK_EMPTY),
         buf: UnsafeCell::new(Some(Vec::new())),
     });
-    let sender = Sender {
-        inner: send_buf,
-    };
+    let sender = Sender { inner: send_buf };
 
-    let recv_buf = RecvBuf {
-        sender: sender.clone(),
-        buf: UnsafeCell::new(Some(VecDeque::new())),
-    };
+    let recv_buf = RecvBuf { sender: sender.clone(), buf: UnsafeCell::new(Some(VecDeque::new())) };
 
-    (sender,
-     Receiver {
-        inner: recv_buf,
-    })
+    (sender, Receiver { inner: recv_buf })
 }
 
 /*
 * 发送缓冲区
 */
 struct SendBuf<T: 'static> {
-    buf_status:    AtomicU8,                         //缓冲区锁状态
-    buf:           UnsafeCell<Option<Vec<T>>>,       //缓冲区
+    buf_status: AtomicU8,            //缓冲区锁状态
+    buf: UnsafeCell<Option<Vec<T>>>, //缓冲区
 }
 
 ///
 /// 双端队列的发送者
 ///
 pub struct Sender<T: 'static> {
-    inner:  Arc<SendBuf<T>>, //缓冲区
+    inner: Arc<SendBuf<T>>, //缓冲区
 }
 
 unsafe impl<T: 'static> Send for Sender<T> {}
@@ -58,9 +50,7 @@ unsafe impl<T: 'static> Sync for Sender<T> {}
 
 impl<T: 'static> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        Sender {
-            inner: self.inner.clone(),
-        }
+        Sender { inner: self.inner.clone() }
     }
 }
 
@@ -75,20 +65,22 @@ impl<T: 'static> Sender<T> {
         let mut spin_len = 1;
         let mut status = UNLOCK_NON_EMPTY;
         loop {
-            match self.inner.buf_status.compare_exchange_weak(status,
-                                                              LOCKED,
-                                                              Ordering::Acquire,
-                                                              Ordering::Relaxed) {
+            match self.inner.buf_status.compare_exchange_weak(
+                status,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Err(current) if current == LOCKED => {
                     //已锁，则自旋后继续尝试锁
                     spin_len = spin(spin_len);
                     continue;
-                },
+                }
                 Err(current) => {
                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                     status = current;
                     continue;
-                },
+                }
                 Ok(_) => {
                     //锁成功，则获取发送缓冲区长度
                     unsafe {
@@ -110,20 +102,22 @@ impl<T: 'static> Sender<T> {
         let mut spin_len = 1;
         let mut status = UNLOCK_NON_EMPTY;
         loop {
-            match self.inner.buf_status.compare_exchange_weak(status,
-                                                              LOCKED,
-                                                              Ordering::Acquire,
-                                                              Ordering::Relaxed) {
+            match self.inner.buf_status.compare_exchange_weak(
+                status,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Err(current) if current == LOCKED => {
                     //已锁，则自旋后继续尝试锁
                     spin_len = spin(spin_len);
                     continue;
-                },
+                }
                 Err(current) => {
                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                     status = current;
                     continue;
-                },
+                }
                 Ok(_) => {
                     //锁成功，则加入发送缓冲区
                     unsafe {
@@ -148,20 +142,22 @@ impl<T: 'static> Sender<T> {
         let mut spin_len = 1;
         let mut status = UNLOCK_NON_EMPTY;
         loop {
-            match self.inner.buf_status.compare_exchange_weak(status,
-                                                              LOCKED,
-                                                              Ordering::Acquire,
-                                                              Ordering::Relaxed) {
+            match self.inner.buf_status.compare_exchange_weak(
+                status,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Err(current) if current == LOCKED => {
                     //已锁，则自旋后继续尝试锁
                     spin_len = spin(spin_len);
                     continue;
-                },
+                }
                 Err(current) => {
                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                     status = current;
                     continue;
-                },
+                }
                 Ok(_) => {
                     //锁成功，则取出所有值
                     let r = replace_send_buf(&self.inner.buf);
@@ -179,15 +175,15 @@ impl<T: 'static> Sender<T> {
 * 接收缓冲区
 */
 struct RecvBuf<T: 'static> {
-    sender: Sender<T>,                          //发送者
-    buf:    UnsafeCell<Option<VecDeque<T>>>,    //缓冲区
+    sender: Sender<T>,                    //发送者
+    buf: UnsafeCell<Option<VecDeque<T>>>, //缓冲区
 }
 
 ///
 /// 双端队列的接收者
 ///
 pub struct Receiver<T: 'static> {
-    inner:  RecvBuf<T>,  //缓冲区
+    inner: RecvBuf<T>, //缓冲区
 }
 
 unsafe impl<T: 'static> Send for Receiver<T> {}
@@ -196,15 +192,14 @@ impl<T: 'static> Receiver<T> {
     /// 尝试检查队列是否为空，不允许用于精确判断
     pub fn try_is_empty(&self) -> bool {
         unsafe {
-            self.inner.sender.try_is_empty() && (&*self.inner.buf.get()).as_ref().unwrap().is_empty()
+            self.inner.sender.try_is_empty()
+                && (&*self.inner.buf.get()).as_ref().unwrap().is_empty()
         }
     }
 
     /// 获取队列长度，可用于精确判断
     pub fn len(&self) -> usize {
-        unsafe {
-            self.inner.sender.len() + (&*self.inner.buf.get()).as_ref().unwrap().len()
-        }
+        unsafe { self.inner.sender.len() + (&*self.inner.buf.get()).as_ref().unwrap().len() }
     }
 
     /// 将指定值推入接收缓冲区头
@@ -230,32 +225,45 @@ impl<T: 'static> Receiver<T> {
                     let mut spin_len = 1;
                     let mut status = UNLOCK_NON_EMPTY;
                     loop {
-                        match self.inner.sender.inner.buf_status.compare_exchange_weak(status,
-                                                                                       LOCKED,
-                                                                                       Ordering::Acquire,
-                                                                                       Ordering::Relaxed) {
+                        match self.inner.sender.inner.buf_status.compare_exchange_weak(
+                            status,
+                            LOCKED,
+                            Ordering::Acquire,
+                            Ordering::Relaxed,
+                        ) {
                             Err(current) if current == LOCKED => {
                                 //已锁，则自旋后继续尝试锁
                                 spin_len = spin(spin_len);
                                 continue;
-                            },
+                            }
                             Err(current) => {
                                 //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                                 status = current;
                                 continue;
-                            },
+                            }
                             Ok(_) => {
                                 //锁成功，则交换发送缓冲区和接收缓冲区，并从接收缓冲区弹出
                                 if swap(self.inner.sender.inner.buf.get(), self.inner.buf.get()) {
                                     //交换成功，则从交换后的接收缓冲区弹出值
-                                    self.inner.sender.inner.buf_status.store(UNLOCK_EMPTY, Ordering::SeqCst);
-                                    return (&mut *self.inner.buf.get()).as_mut().unwrap().pop_front();
+                                    self.inner
+                                        .sender
+                                        .inner
+                                        .buf_status
+                                        .store(UNLOCK_EMPTY, Ordering::SeqCst);
+                                    return (&mut *self.inner.buf.get())
+                                        .as_mut()
+                                        .unwrap()
+                                        .pop_front();
                                 } else {
                                     //交换失败，则立即返回空
-                                    self.inner.sender.inner.buf_status.store(UNLOCK_EMPTY, Ordering::SeqCst);
+                                    self.inner
+                                        .sender
+                                        .inner
+                                        .buf_status
+                                        .store(UNLOCK_EMPTY, Ordering::SeqCst);
                                     return None;
                                 }
-                            },
+                            }
                         }
                     }
                 }
@@ -282,33 +290,44 @@ impl<T: 'static> Receiver<T> {
                         let mut spin_len = 1;
                         let mut status = UNLOCK_NON_EMPTY;
                         loop {
-                            match self.inner.sender.inner.buf_status.compare_exchange_weak(status,
-                                                                                           LOCKED,
-                                                                                           Ordering::Acquire,
-                                                                                           Ordering::Relaxed) {
+                            match self.inner.sender.inner.buf_status.compare_exchange_weak(
+                                status,
+                                LOCKED,
+                                Ordering::Acquire,
+                                Ordering::Relaxed,
+                            ) {
                                 Err(current) if current == LOCKED => {
                                     //已锁，则自旋后继续尝试锁
                                     spin_len = spin(spin_len);
                                     continue;
-                                },
+                                }
                                 Err(current) => {
                                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                                     status = current;
                                     continue;
-                                },
+                                }
                                 Ok(_) => {
                                     //锁成功，则交换发送缓冲区和接收缓冲区，并从接收缓冲区弹出
-                                    if swap(self.inner.sender.inner.buf.get(), self.inner.buf.get()) {
+                                    if swap(self.inner.sender.inner.buf.get(), self.inner.buf.get())
+                                    {
                                         //交换成功，则从交换后的接收缓冲区弹出值
-                                        self.inner.sender.inner.buf_status.store(UNLOCK_EMPTY, Ordering::SeqCst);
+                                        self.inner
+                                            .sender
+                                            .inner
+                                            .buf_status
+                                            .store(UNLOCK_EMPTY, Ordering::SeqCst);
                                         truncated = true; //已截短
                                         break;
                                     } else {
                                         //交换失败，则立即返回
-                                        self.inner.sender.inner.buf_status.store(UNLOCK_EMPTY, Ordering::SeqCst);
+                                        self.inner
+                                            .sender
+                                            .inner
+                                            .buf_status
+                                            .store(UNLOCK_EMPTY, Ordering::SeqCst);
                                         return vec;
                                     }
-                                },
+                                }
                             }
                         }
                     }

@@ -2,13 +2,9 @@
 
 extern crate test;
 
-use pi_async::{
-    prelude::{SingleTaskPool, SingleTaskRunner, SingleTaskRuntime},
-    rt::{
-        serial_local_thread::{LocalTaskRunner, LocalTaskRuntime},
-        AsyncRuntimeExt,
-    },
-};
+use pi_async::prelude::{SingleTaskPool, SingleTaskRunner, SingleTaskRuntime};
+use pi_async::rt::serial_local_thread::{LocalTaskRunner, LocalTaskRuntime};
+use pi_async::rt::AsyncRuntimeExt;
 use test::Bencher;
 
 fn runtime() -> LocalTaskRuntime {

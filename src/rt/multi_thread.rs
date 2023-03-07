@@ -1,5 +1,31 @@
 //! # 多线程运行时
 //!
+//! - [ComputationalTaskPool]\: 计算型的多线程任务池，适合用于Cpu密集型的应用，
+//!   不支持运行时伸缩
+//! - [StealableTaskPool]\:
+//!   可窃取的多线程任务池，适合用于block较多的应用，支持运行时伸缩
+//! - [MultiTaskRuntime]\: 异步多线程任务运行时，支持运行时线程伸缩
+//! - [MultiTaskRuntimeBuilder]\: 异步多线程任务运行时构建器
+//!
+//! [ComputationalTaskPool]: struct.ComputationalTaskPool.html
+//! [StealableTaskPool]: struct.StealableTaskPool.html
+//! [MultiTaskRuntime]: struct.MultiTaskRuntime.html
+//! [MultiTaskRuntimeBuilder]: struct.MultiTaskRuntimeBuilder.html
+//!
+//! # Examples
+//!
+//! ```
+//! use pi_async::prelude::{MultiTaskRuntime, MultiTaskRuntimeBuilder, StealableTaskPool};
+//! use pi_async::rt::AsyncRuntimeExt;
+//!
+//! let pool = StealableTaskPool::with(4, 4);
+//! let builer = MultiTaskRuntimeBuilder::new(pool)
+//!     .set_timer_interval(1)
+//!     .init_worker_size(4)
+//!     .set_worker_limit(4, 4);
+//! let rt = builer.build();
+//! let _ = rt.spawn(rt.alloc(), async move {});
+//! ```
 
 use std::any::Any;
 use std::cell::UnsafeCell;
@@ -19,12 +45,10 @@ use crossbeam_channel::{bounded, unbounded, Sender};
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use crossbeam_queue::{ArrayQueue, SegQueue};
 use flume::bounded as async_bounded;
-use futures::{
-    future::{BoxFuture, FutureExt},
-    stream::{BoxStream, Stream, StreamExt},
-    task::{waker_ref, ArcWake},
-    TryFuture,
-};
+use futures::future::{BoxFuture, FutureExt};
+use futures::stream::{BoxStream, Stream, StreamExt};
+use futures::task::{waker_ref, ArcWake};
+use futures::TryFuture;
 use log::{debug, warn};
 use num_cpus;
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -38,43 +62,43 @@ use super::{
 };
 
 /*
-* 默认的初始工作者数量
-*/
+ * 默认的初始工作者数量
+ */
 #[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_INIT_WORKER_SIZE: usize = 2;
 #[cfg(target_arch = "wasm32")]
 const DEFAULT_INIT_WORKER_SIZE: usize = 1;
 
 /*
-* 默认的工作者线程名称前缀
-*/
+ * 默认的工作者线程名称前缀
+ */
 const DEFAULT_WORKER_THREAD_PREFIX: &str = "Default-Multi-RT";
 
 /*
-* 默认的线程栈大小
-*/
+ * 默认的线程栈大小
+ */
 const DEFAULT_THREAD_STACK_SIZE: usize = 1024 * 1024;
 
 /*
-* 默认的工作者线程空闲休眠时长，单位ms
-*/
+ * 默认的工作者线程空闲休眠时长，单位ms
+ */
 const DEFAULT_WORKER_THREAD_SLEEP_TIME: u64 = 10;
 
 /*
-* 默认的运行时空闲休眠时长，单位ms，运行时空闲是指绑定当前运行时的队列为空，且定时器内未到期的任务为空
-*/
+ * 默认的运行时空闲休眠时长，单位ms，运行时空闲是指绑定当前运行时的队列为空，
+ * 且定时器内未到期的任务为空
+ */
 const DEFAULT_RUNTIME_SLEEP_TIME: u64 = 1000;
 
 /*
-* 线程唯一id
-*/
+ * 线程唯一id
+ */
 thread_local! {
     static PI_ASYNC_THREAD_LOCAL_ID: UnsafeCell<usize> = UnsafeCell::new(0);
 }
 
 ///
 /// 计算型的工作者任务队列
-///
 struct ComputationalTaskQueue<O: Default + 'static> {
     stack: Worker<Arc<AsyncTask<ComputationalTaskPool<O>, O>>>, //工作者任务栈
     queue: SegQueue<Arc<AsyncTask<ComputationalTaskPool<O>, O>>>, //工作者任务队列
@@ -87,11 +111,7 @@ impl<O: Default + 'static> ComputationalTaskQueue<O> {
         let stack = Worker::new_lifo();
         let queue = SegQueue::new();
 
-        ComputationalTaskQueue {
-            stack,
-            queue,
-            thread_waker,
-        }
+        ComputationalTaskQueue { stack, queue, thread_waker }
     }
 
     //获取计算型的工作者任务队列的任务数量
@@ -102,7 +122,6 @@ impl<O: Default + 'static> ComputationalTaskQueue<O> {
 
 ///
 /// 计算型的多线程任务池，适合用于Cpu密集型的应用，不支持运行时伸缩
-///
 pub struct ComputationalTaskPool<O: Default + 'static> {
     workers: Vec<ComputationalTaskQueue<O>>, //工作者的任务队列列表
     waits: Option<Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>>, //待唤醒的工作者唤醒器队列
@@ -131,11 +150,7 @@ impl<O: Default + 'static> AsyncTaskPool<O> for ComputationalTaskPool<O> {
         match PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe { *thread_id.get() }) {
             Err(e) => {
                 //不应该执行到这个分支
-                panic!(
-                    "Get thread id failed, thread: {:?}, reason: {:?}",
-                    thread::current(),
-                    e
-                );
+                panic!("Get thread id failed, thread: {:?}, reason: {:?}", thread::current(), e);
             }
             Ok(id) => id,
         }
@@ -252,18 +267,12 @@ impl<O: Default + 'static> ComputationalTaskPool<O> {
         let consume_count = Arc::new(AtomicUsize::new(0));
         let produce_count = Arc::new(AtomicUsize::new(0));
 
-        ComputationalTaskPool {
-            workers,
-            waits: None,
-            consume_count,
-            produce_count,
-        }
+        ComputationalTaskPool { workers, waits: None, consume_count, produce_count }
     }
 }
 
 ///
 /// 可窃取的工作者任务队列
-///
 struct StealableTaskQueue<O: Default + 'static> {
     stack: Worker<Arc<AsyncTask<StealableTaskPool<O>, O>>>, //工作者任务栈
     queue: Worker<Arc<AsyncTask<StealableTaskPool<O>, O>>>, //工作者任务队列，可窃取
@@ -279,14 +288,7 @@ impl<O: Default + 'static> StealableTaskQueue<O> {
         let queue = Worker::new_fifo();
         let stealer = queue.stealer();
 
-        (
-            StealableTaskQueue {
-                stack,
-                queue,
-                thread_waker,
-            },
-            stealer,
-        )
+        (StealableTaskQueue { stack, queue, thread_waker }, stealer)
     }
 
     //获取可窃取的工作者任务队列的任务数量
@@ -297,11 +299,10 @@ impl<O: Default + 'static> StealableTaskQueue<O> {
 
 ///
 /// 可窃取的多线程任务池，适合用于block较多的应用，支持运行时伸缩
-///
 pub struct StealableTaskPool<O: Default + 'static> {
     public: Injector<Arc<AsyncTask<StealableTaskPool<O>, O>>>, //公共的任务池
     workers: Vec<Arc<RwLock<Option<StealableTaskQueue<O>>>>>,  //工作者的任务队列列表
-    worker_stealers: Vec<Arc<RwLock<Option<Stealer<Arc<AsyncTask<StealableTaskPool<O>, O>>>>>>>, //工作者任务队列的窃取者
+    worker_stealers: Vec<Arc<RwLock<Option<Stealer<Arc<AsyncTask<StealableTaskPool<O>, O>>>>>>>, /* 工作者任务队列的窃取者 */
     frees: ArrayQueue<usize>, //可分派的工作者列表偏移
     waits: Option<Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>>, //待唤醒的工作者唤醒器队列
     consume_count: Arc<AtomicUsize>,                                       //任务消费计数
@@ -325,11 +326,7 @@ impl<O: Default + 'static> AsyncTaskPool<O> for StealableTaskPool<O> {
         match PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| unsafe { *thread_id.get() }) {
             Err(e) => {
                 //不应该执行到这个分支
-                panic!(
-                    "Get thread id failed, thread: {:?}, reason: {:?}",
-                    thread::current(),
-                    e
-                );
+                panic!("Get thread id failed, thread: {:?}, reason: {:?}", thread::current(), e);
             }
             Ok(id) => id,
         }
@@ -366,10 +363,7 @@ impl<O: Default + 'static> AsyncTaskPool<O> for StealableTaskPool<O> {
 
         Err(Error::new(
             ErrorKind::Other,
-            format!(
-                "Push timed out failed, thread id: {}, reason: worker not exists",
-                id
-            ),
+            format!("Push timed out failed, thread id: {}, reason: worker not exists", id),
         ))
     }
 
@@ -529,10 +523,7 @@ impl<O: Default + 'static> AsyncTaskPoolExt<O> for StealableTaskPool<O> {
             }
         }
 
-        workers_len
-            .checked_sub(self.frees.len())
-            .or(Some(0))
-            .unwrap()
+        workers_len.checked_sub(self.frees.len()).or(Some(0)).unwrap()
     }
 
     #[inline]
@@ -557,17 +548,11 @@ impl<O: Default + 'static> AsyncTaskPoolExt<O> for StealableTaskPool<O> {
 
         //移除当前线程的工作者任务池
         let _ = self.workers[thread_id].write().take();
-        warn!(
-            "Remove worker task pool ok, worker: {}, thread: {:?}",
-            thread_id, current
-        );
+        warn!("Remove worker task pool ok, worker: {}, thread: {:?}", thread_id, current);
 
         //移除当前线程的工作者的任务窃取者
         let _ = self.worker_stealers[thread_id].write().take();
-        warn!(
-            "Remove worker stealer ok, worker: {}, thread: {:?}",
-            thread_id, current
-        );
+        warn!("Remove worker stealer ok, worker: {}, thread: {:?}", thread_id, current);
 
         //记录当前被关闭的工作者偏移
         self.frees.push(thread_id);
@@ -628,7 +613,6 @@ impl<O: Default + 'static> StealableTaskPool<O> {
 
 ///
 /// 异步多线程任务运行时，支持运行时线程伸缩
-///
 pub struct MultiTaskRuntime<
     O: Default + 'static = (),
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = StealableTaskPool<O>,
@@ -636,15 +620,10 @@ pub struct MultiTaskRuntime<
     Arc<(
         usize,  //运行时唯一id
         Arc<P>, //异步任务池
-        Option<
-            Vec<(
-                Sender<(usize, AsyncTimingTask<P, O>)>,
-                Arc<Mutex<AsyncTaskTimer<P, O>>>,
-            )>,
-        >, //休眠的异步任务生产者和本地定时器
-        AtomicUsize, //定时任务计数器
+        Option<Vec<(Sender<(usize, AsyncTimingTask<P, O>)>, Arc<Mutex<AsyncTaskTimer<P, O>>>)>>, //休眠的异步任务生产者和本地定时器
+        AtomicUsize,                                            //定时任务计数器
         Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>, //待唤醒的工作者唤醒器队列
-        (String, usize, usize, u64, Option<usize>), //当前运行时配置参数
+        (String, usize, usize, u64, Option<usize>),             //当前运行时配置参数
     )>,
 );
 
@@ -707,11 +686,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
     where
         F: Future<Output = O> + Send + 'static,
     {
-        let task = Arc::new(AsyncTask::new(
-            task_id,
-            (self.0).1.clone(),
-            Some(future.boxed()),
-        ));
+        let task = Arc::new(AsyncTask::new(task_id, (self.0).1.clone(), Some(future.boxed())));
         let result = (self.0).1.push(task);
 
         if let Some(worker_waker) = (self.0).4.pop() {
@@ -786,18 +761,13 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
 
         Err(Error::new(
             ErrorKind::Other,
-            format!(
-                "Spawn timing task failed, task_id: {:?}, reason: timer not exist",
-                task_id
-            ),
+            format!("Spawn timing task failed, task_id: {:?}, reason: timer not exist", task_id),
         ))
     }
 
     /// 挂起指定唯一id的异步任务
     fn pending<Output>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output> {
-        task_id
-            .0
-            .store(Box::into_raw(Box::new(waker)) as usize, Ordering::Relaxed);
+        task_id.0.store(Box::into_raw(Box::new(waker)) as usize, Ordering::Relaxed);
         Poll::Pending
     }
 
@@ -812,43 +782,39 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
         }
     }
 
-    /// 挂起当前异步运行时的当前任务，并在指定的其它运行时上派发一个指定的异步任务，等待其它运行时上的异步任务完成后，唤醒当前运行时的当前任务，并返回其它运行时上的异步任务的值
+    /// 挂起当前异步运行时的当前任务，
+    /// 并在指定的其它运行时上派发一个指定的异步任务，
+    /// 等待其它运行时上的异步任务完成后，唤醒当前运行时的当前任务，
+    /// 并返回其它运行时上的异步任务的值
     fn wait<V: Send + 'static>(&self) -> AsyncWait<V> {
         AsyncWait(self.wait_any(2))
     }
 
-    /// 挂起当前异步运行时的当前任务，并在多个其它运行时上执行多个其它任务，其中任意一个任务完成，则唤醒当前运行时的当前任务，并返回这个已完成任务的值，而其它未完成的任务的值将被忽略
+    /// 挂起当前异步运行时的当前任务，并在多个其它运行时上执行多个其它任务，
+    /// 其中任意一个任务完成，则唤醒当前运行时的当前任务，
+    /// 并返回这个已完成任务的值，而其它未完成的任务的值将被忽略
     fn wait_any<V: Send + 'static>(&self, capacity: usize) -> AsyncWaitAny<V> {
         let (producor, consumer) = async_bounded(capacity);
 
-        AsyncWaitAny {
-            capacity,
-            producor,
-            consumer,
-        }
+        AsyncWaitAny { capacity, producor, consumer }
     }
 
-    /// 挂起当前异步运行时的当前任务，并在多个其它运行时上执行多个其它任务，任务返回后需要通过用户指定的检查回调进行检查，其中任意一个任务检查通过，则唤醒当前运行时的当前任务，并返回这个已完成任务的值，而其它未完成或未检查通过的任务的值将被忽略，如果所有任务都未检查通过，则强制唤醒当前运行时的当前任务
+    /// 挂起当前异步运行时的当前任务，并在多个其它运行时上执行多个其它任务，
+    /// 任务返回后需要通过用户指定的检查回调进行检查，其中任意一个任务检查通过，
+    /// 则唤醒当前运行时的当前任务，并返回这个已完成任务的值，
+    /// 而其它未完成或未检查通过的任务的值将被忽略，如果所有任务都未检查通过，
+    /// 则强制唤醒当前运行时的当前任务
     fn wait_any_callback<V: Send + 'static>(&self, capacity: usize) -> AsyncWaitAnyCallback<V> {
         let (producor, consumer) = async_bounded(capacity);
 
-        AsyncWaitAnyCallback {
-            capacity,
-            producor,
-            consumer,
-        }
+        AsyncWaitAnyCallback { capacity, producor, consumer }
     }
 
     /// 构建用于派发多个异步任务到指定运行时的映射归并，需要指定映射归并的容量
     fn map_reduce<V: Send + 'static>(&self, capacity: usize) -> AsyncMapReduce<V> {
         let (producor, consumer) = async_bounded(capacity);
 
-        AsyncMapReduce {
-            count: 0,
-            capacity,
-            producor,
-            consumer,
-        }
+        AsyncMapReduce { count: 0, capacity, producor, consumer }
     }
 
     /// 挂起当前异步运行时的当前任务，等待指定的时间后唤醒当前任务
@@ -1002,10 +968,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
 
         Err(Error::new(
             ErrorKind::Other,
-            format!(
-                "Spawn timing task failed, task_id: {:?}, reason: timer not exist",
-                task_id
-            ),
+            format!("Spawn timing task failed, task_id: {:?}, reason: timer not exist", task_id),
         ))
     }
 
@@ -1034,18 +997,14 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
 
             Default::default()
         }) {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("Block on failed, reason: {:?}", e),
-            ));
+            return Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)));
         }
 
         //同步阻塞等待异步任务返回
         match receiver.recv() {
-            Err(e) => Err(Error::new(
-                ErrorKind::Other,
-                format!("Block on failed, reason: {:?}", e),
-            )),
+            Err(e) => {
+                Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)))
+            }
             Ok(result) => Ok(result),
         }
     }
@@ -1161,7 +1120,6 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
 
 ///
 /// 异步多线程任务运行时构建器
-///
 pub struct MultiTaskRuntimeBuilder<
     O: Default + 'static = (),
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = StealableTaskPool<O>,
@@ -1194,16 +1152,15 @@ impl<O: Default + 'static> Default for MultiTaskRuntimeBuilder<O> {
         #[cfg(target_arch = "wasm32")]
         let core_len = 1; //默认的工作者的数量为1
         let pool = StealableTaskPool::with(core_len, core_len);
-        MultiTaskRuntimeBuilder::new(pool)
-            .thread_stack_size(2 * 1024 * 1024)
-            .set_timer_interval(1)
+        MultiTaskRuntimeBuilder::new(pool).thread_stack_size(2 * 1024 * 1024).set_timer_interval(1)
     }
 }
 
 impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
     MultiTaskRuntimeBuilder<O, P>
 {
-    /// 构建指定任务池、线程名前缀、初始线程数量、最少线程数量、最大线程数量、线程栈大小、线程空闲时最长休眠时间和是否使用本地定时器的多线程任务池
+    /// 构建指定任务池、线程名前缀、初始线程数量、最少线程数量、最大线程数量、
+    /// 线程栈大小、线程空闲时最长休眠时间和是否使用本地定时器的多线程任务池
     pub fn new(mut pool: P) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let core_len = num_cpus::get(); //获取本机cpu逻辑核数
@@ -1279,13 +1236,11 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
     pub fn build(mut self) -> MultiTaskRuntime<O, P> {
         //构建多线程任务运行时的本地定时器和定时异步任务生产者
         let interval = self.interval;
-        let mut timers = if let Some(_) = interval {
-            Some(Vec::with_capacity(self.max))
-        } else {
-            None
-        };
+        let mut timers =
+            if let Some(_) = interval { Some(Vec::with_capacity(self.max)) } else { None };
         for _ in 0..self.max {
-            //初始化指定的最大线程数量的本地定时器和定时异步任务生产者，定时器不会在关闭工作者时被移除
+            //初始化指定的最大线程数量的本地定时器和定时异步任务生产者，
+            // 定时器不会在关闭工作者时被移除
             if let Some(vec) = &mut timers {
                 let timer = AsyncTaskTimer::new();
                 let producor = timer.producor.clone();
@@ -1306,13 +1261,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
             timers,
             AtomicUsize::new(0),
             waits,
-            (
-                self.prefix.clone(),
-                self.min,
-                self.stack_size,
-                self.timeout,
-                self.interval,
-            ),
+            (self.prefix.clone(), self.min, self.stack_size, self.timeout, self.interval),
         )));
 
         //构建初始化线程数量的线程构建器
@@ -1384,14 +1333,7 @@ fn spawn_worker_thread<
             }
 
             //执行有定时器的工作循环
-            timer_work_loop(
-                runtime,
-                index,
-                min,
-                timeout,
-                interval.unwrap() as u64,
-                timer,
-            );
+            timer_work_loop(runtime, index, min, timeout, interval.unwrap() as u64, timer);
         });
     } else {
         //未设置定时器
@@ -1466,7 +1408,8 @@ fn timer_work_loop<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<
                         }
 
                         if let Some(task) = pool.try_pop() {
-                            //执行当前工作者任务池中的异步任务，避免定时异步任务占用当前工作者的所有工作时间
+                            //执行当前工作者任务池中的异步任务，
+                            // 避免定时异步任务占用当前工作者的所有工作时间
                             sleep_count = 0; //重置连续休眠次数
                             run_task(&runtime, task);
                         }
@@ -1674,11 +1617,13 @@ fn run_task<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool
     let mut context = Context::from_waker(&*waker);
     if let Some(mut future) = task.get_inner() {
         if let Poll::Pending = future.as_mut().poll(&mut context) {
-            //当前未准备好，则恢复异步任务，以保证异步服务后续访问异步任务和异步任务不被提前释放
+            //当前未准备好，则恢复异步任务，
+            // 以保证异步服务后续访问异步任务和异步任务不被提前释放
             task.set_inner(Some(future));
         }
     } else {
-        //当前异步任务在唤醒时还未被重置内部任务，则继续加入当前异步运行时队列，并等待下次被执行
+        //当前异步任务在唤醒时还未被重置内部任务，则继续加入当前异步运行时队列，
+        // 并等待下次被执行
         (runtime.0).1.push(task);
     }
 }
@@ -1966,23 +1911,21 @@ fn test_mutli_task_pool() {
     join5.join();
     join6.join();
     join7.join();
-    println!(
-        "pool len: {}, time: {:?}",
-        pool.len(),
-        Instant::now() - start
-    );
+    println!("pool len: {}, time: {:?}", pool.len(), Instant::now() - start);
 }
 
 #[test]
 fn test_computational_runtime() {
+    use std::mem;
+    use std::time::Instant;
+
+    use env_logger;
+
     use crate::rt::{
         clear_local_dict, get_local_dict, get_local_dict_mut, remove_local_dict, set_local_dict,
         spawn_local,
     };
     use crate::tests::test_lib::AtomicCounter;
-    use env_logger;
-    use std::mem;
-    use std::time::Instant;
     env_logger::init();
     let pool = ComputationalTaskPool::new(8);
     let builer = MultiTaskRuntimeBuilder::new(pool)
@@ -2152,14 +2095,16 @@ fn test_computational_runtime() {
 
 #[test]
 fn test_stealable_runtime() {
+    use std::mem;
+    use std::time::Instant;
+
+    use env_logger;
+
     use crate::rt::{
         clear_local_dict, get_local_dict, get_local_dict_mut, remove_local_dict, set_local_dict,
         spawn_local,
     };
     use crate::tests::test_lib::AtomicCounter;
-    use env_logger;
-    use std::mem;
-    use std::time::Instant;
     env_logger::init();
 
     let pool = StealableTaskPool::with(8, 8);

@@ -1,28 +1,28 @@
 //! # 多生产者多消费者的双端队列
 //!
 
-use std::sync::Arc;
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 use super::spin;
 
 /*
 * 锁状态
 */
-const UNLOCK_EMPTY: u8 = 0;     //无锁无任务
+const UNLOCK_EMPTY: u8 = 0; //无锁无任务
 const UNLOCK_NON_EMPTY: u8 = 1; //无锁有任务
-const LOCKED: u8 = 2;           //有锁
+const LOCKED: u8 = 2; //有锁
 
 /*
 * 内部自旋锁双端队列
 */
 struct InnerDeque<T: 'static> {
-    tail_status:    AtomicU8,                         //队列尾锁状态
-    tail:           UnsafeCell<Option<Vec<T>>>,       //队列尾
-    head_status:    AtomicU8,                         //队列头锁状态
-    head:           UnsafeCell<Option<VecDeque<T>>>,  //队列头
+    tail_status: AtomicU8,                 //队列尾锁状态
+    tail: UnsafeCell<Option<Vec<T>>>,      //队列尾
+    head_status: AtomicU8,                 //队列头锁状态
+    head: UnsafeCell<Option<VecDeque<T>>>, //队列头
 }
 
 unsafe impl<T: 'static> Send for InnerDeque<T> {}
@@ -32,7 +32,7 @@ unsafe impl<T: 'static> Sync for InnerDeque<T> {}
 /// MPMC双端队列
 ///
 pub struct MpmcDeque<T: 'static> {
-    inner:  Arc<InnerDeque<T>>, //内部自旋锁双端队列
+    inner: Arc<InnerDeque<T>>, //内部自旋锁双端队列
 }
 
 unsafe impl<T: 'static> Send for MpmcDeque<T> {}
@@ -40,9 +40,7 @@ unsafe impl<T: 'static> Sync for MpmcDeque<T> {}
 
 impl<T: 'static> Clone for MpmcDeque<T> {
     fn clone(&self) -> Self {
-        MpmcDeque {
-            inner: self.inner.clone(),
-        }
+        MpmcDeque { inner: self.inner.clone() }
     }
 }
 
@@ -56,9 +54,7 @@ impl<T: 'static> MpmcDeque<T> {
             head: UnsafeCell::new(Some(VecDeque::new())),
         });
 
-        MpmcDeque {
-            inner,
-        }
+        MpmcDeque { inner }
     }
 
     /// 构建指定初始容量的自旋锁双端队列
@@ -70,9 +66,7 @@ impl<T: 'static> MpmcDeque<T> {
             head: UnsafeCell::new(Some(VecDeque::new())),
         });
 
-        MpmcDeque {
-            inner,
-        }
+        MpmcDeque { inner }
     }
 
     /// 检查队列尾是否为空
@@ -90,20 +84,22 @@ impl<T: 'static> MpmcDeque<T> {
         let mut spin_len = 1;
         let mut status = UNLOCK_NON_EMPTY;
         loop {
-            match self.inner.tail_status.compare_exchange_weak(status,
-                                                               LOCKED,
-                                                               Ordering::Acquire,
-                                                               Ordering::Relaxed) {
+            match self.inner.tail_status.compare_exchange_weak(
+                status,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Err(current) if current == LOCKED => {
                     //已锁，则自旋后继续尝试锁
                     spin_len = spin(spin_len);
                     continue;
-                },
+                }
                 Err(current) => {
                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                     status = current;
                     continue;
-                },
+                }
                 Ok(_) => {
                     //锁成功，则获取队列尾长度
                     unsafe {
@@ -125,20 +121,22 @@ impl<T: 'static> MpmcDeque<T> {
         let mut spin_len = 1;
         let mut status = UNLOCK_NON_EMPTY;
         loop {
-            match self.inner.head_status.compare_exchange_weak(status,
-                                                               LOCKED,
-                                                               Ordering::Acquire,
-                                                               Ordering::Relaxed) {
+            match self.inner.head_status.compare_exchange_weak(
+                status,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Err(current) if current == LOCKED => {
                     //已锁，则自旋后继续尝试锁
                     spin_len = spin(spin_len);
                     continue;
-                },
+                }
                 Err(current) => {
                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                     status = current;
                     continue;
-                },
+                }
                 Ok(_) => {
                     //锁成功，则获取队列尾长度
                     unsafe {
@@ -160,20 +158,22 @@ impl<T: 'static> MpmcDeque<T> {
         let mut spin_len = 1;
         let mut status = UNLOCK_NON_EMPTY;
         loop {
-            match self.inner.head_status.compare_exchange_weak(status,
-                                                               LOCKED,
-                                                               Ordering::Acquire,
-                                                               Ordering::Relaxed) {
+            match self.inner.head_status.compare_exchange_weak(
+                status,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Err(current) if current == LOCKED => {
                     //已锁，则自旋后继续尝试锁
                     spin_len = spin(spin_len);
                     continue;
-                },
+                }
                 Err(current) => {
                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                     status = current;
                     continue;
-                },
+                }
                 Ok(_) => {
                     //锁成功，则弹出队列头
                     unsafe {
@@ -190,38 +190,57 @@ impl<T: 'static> MpmcDeque<T> {
                             //队列头没有值，则尝试从队列尾中弹出值
                             status = UNLOCK_NON_EMPTY;
                             loop {
-                                match self.inner.tail_status.compare_exchange_weak(status,
-                                                                                   LOCKED,
-                                                                                   Ordering::Acquire,
-                                                                                   Ordering::Relaxed) {
+                                match self.inner.tail_status.compare_exchange_weak(
+                                    status,
+                                    LOCKED,
+                                    Ordering::Acquire,
+                                    Ordering::Relaxed,
+                                ) {
                                     Err(current) if current == LOCKED => {
                                         //已锁，则自旋后继续尝试锁
                                         spin_len = spin(spin_len);
                                         continue;
-                                    },
+                                    }
                                     Err(current) => {
                                         //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                                         status = current;
                                         continue;
-                                    },
+                                    }
                                     Ok(_) => {
                                         //锁成功，则交换队列尾和队列头，并弹出队列头
                                         if swap(&self.inner.tail, &self.inner.head) {
-                                            self.inner.tail_status.store(UNLOCK_EMPTY, Ordering::SeqCst);
-                                            self.inner.head_status.store(UNLOCK_NON_EMPTY, Ordering::SeqCst);
+                                            self.inner
+                                                .tail_status
+                                                .store(UNLOCK_EMPTY, Ordering::SeqCst);
+                                            self.inner
+                                                .head_status
+                                                .store(UNLOCK_NON_EMPTY, Ordering::SeqCst);
 
-                                            return (&mut *self.inner.head.get()).as_mut().unwrap().pop_front();
+                                            return (&mut *self.inner.head.get())
+                                                .as_mut()
+                                                .unwrap()
+                                                .pop_front();
                                         } else {
-                                            if (&*self.inner.tail.get()).as_ref().unwrap().is_empty() {
-                                                self.inner.tail_status.store(UNLOCK_EMPTY, Ordering::SeqCst);
+                                            if (&*self.inner.tail.get())
+                                                .as_ref()
+                                                .unwrap()
+                                                .is_empty()
+                                            {
+                                                self.inner
+                                                    .tail_status
+                                                    .store(UNLOCK_EMPTY, Ordering::SeqCst);
                                             } else {
-                                                self.inner.tail_status.store(UNLOCK_NON_EMPTY, Ordering::SeqCst);
+                                                self.inner
+                                                    .tail_status
+                                                    .store(UNLOCK_NON_EMPTY, Ordering::SeqCst);
                                             }
-                                            self.inner.head_status.store(UNLOCK_EMPTY, Ordering::SeqCst);
+                                            self.inner
+                                                .head_status
+                                                .store(UNLOCK_EMPTY, Ordering::SeqCst);
 
                                             return None;
                                         }
-                                    },
+                                    }
                                 }
                             }
                         }
@@ -236,20 +255,22 @@ impl<T: 'static> MpmcDeque<T> {
         let mut spin_len = 1;
         let mut status = UNLOCK_NON_EMPTY;
         loop {
-            match self.inner.head_status.compare_exchange_weak(status,
-                                                               LOCKED,
-                                                               Ordering::Acquire,
-                                                               Ordering::Relaxed) {
+            match self.inner.head_status.compare_exchange_weak(
+                status,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Err(current) if current == LOCKED => {
                     //已锁，则自旋后继续尝试锁
                     spin_len = spin(spin_len);
                     continue;
-                },
+                }
                 Err(current) => {
                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                     status = current;
                     continue;
-                },
+                }
                 Ok(_) => {
                     //锁成功，则加入队列头
                     unsafe {
@@ -274,20 +295,22 @@ impl<T: 'static> MpmcDeque<T> {
         let mut spin_len = 1;
         let mut status = UNLOCK_NON_EMPTY;
         loop {
-            match self.inner.tail_status.compare_exchange_weak(status,
-                                                               LOCKED,
-                                                               Ordering::Acquire,
-                                                               Ordering::Relaxed) {
+            match self.inner.tail_status.compare_exchange_weak(
+                status,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Err(current) if current == LOCKED => {
                     //已锁，则自旋后继续尝试锁
                     spin_len = spin(spin_len);
                     continue;
-                },
+                }
                 Err(current) => {
                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                     status = current;
                     continue;
-                },
+                }
                 Ok(_) => {
                     //锁成功，则加入队列尾
                     unsafe {
@@ -312,20 +335,22 @@ impl<T: 'static> MpmcDeque<T> {
         let mut spin_len = 1;
         let mut status = UNLOCK_NON_EMPTY;
         loop {
-            match self.inner.head_status.compare_exchange_weak(status,
-                                                               LOCKED,
-                                                               Ordering::Acquire,
-                                                               Ordering::Relaxed) {
+            match self.inner.head_status.compare_exchange_weak(
+                status,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Err(current) if current == LOCKED => {
                     //已锁，则自旋后继续尝试锁
                     spin_len = spin(spin_len);
                     continue;
-                },
+                }
                 Err(current) => {
                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                     status = current;
                     continue;
-                },
+                }
                 Ok(_) => {
                     //锁成功，则取出所有值
                     let r = replace_head(&self.inner.head);
@@ -343,20 +368,22 @@ impl<T: 'static> MpmcDeque<T> {
         let mut spin_len = 1;
         let mut status = UNLOCK_NON_EMPTY;
         loop {
-            match self.inner.tail_status.compare_exchange_weak(status,
-                                                               LOCKED,
-                                                               Ordering::Acquire,
-                                                               Ordering::Relaxed) {
+            match self.inner.tail_status.compare_exchange_weak(
+                status,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Err(current) if current == LOCKED => {
                     //已锁，则自旋后继续尝试锁
                     spin_len = spin(spin_len);
                     continue;
-                },
+                }
                 Err(current) => {
                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                     status = current;
                     continue;
-                },
+                }
                 Ok(_) => {
                     //锁成功，则取出所有值
                     let r = replace_tail(&self.inner.tail);
@@ -374,20 +401,22 @@ impl<T: 'static> MpmcDeque<T> {
         let mut spin_len = 1;
         let mut status = UNLOCK_NON_EMPTY;
         loop {
-            match self.inner.head_status.compare_exchange_weak(status,
-                                                               LOCKED,
-                                                               Ordering::Acquire,
-                                                               Ordering::Relaxed) {
+            match self.inner.head_status.compare_exchange_weak(
+                status,
+                LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
                 Err(current) if current == LOCKED => {
                     //已锁，则自旋后继续尝试锁
                     spin_len = spin(spin_len);
                     continue;
-                },
+                }
                 Err(current) => {
                     //锁状态不匹配，则更新当前锁状态，并立即尝试锁
                     status = current;
                     continue;
-                },
+                }
                 Ok(_) => {
                     //锁成功，则
                     join_head(&self.inner.head, head);
@@ -403,7 +432,10 @@ impl<T: 'static> MpmcDeque<T> {
 
 //交换队列头和队列尾
 #[inline]
-fn swap<T: 'static>(tail: &UnsafeCell<Option<Vec<T>>>, head: &UnsafeCell<Option<VecDeque<T>>>) -> bool {
+fn swap<T: 'static>(
+    tail: &UnsafeCell<Option<Vec<T>>>,
+    head: &UnsafeCell<Option<VecDeque<T>>>,
+) -> bool {
     unsafe {
         let tail = tail.get();
         let head = head.get();

@@ -5,10 +5,7 @@ extern crate test;
 use test::Bencher;
 
 fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .unwrap()
+    tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap()
 }
 
 #[bench]

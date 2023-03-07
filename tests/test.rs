@@ -511,11 +511,7 @@ fn test_channel() {
     join5.join();
     join6.join();
     join7.join();
-    println!(
-        "!!!!!!len: {:?}, time: {:?}",
-        receiver.len(),
-        Instant::now() - start
-    );
+    println!("!!!!!!len: {:?}, time: {:?}", receiver.len(), Instant::now() - start);
 
     let sender0 = sender.clone();
     let sender1 = sender.clone();
@@ -587,11 +583,7 @@ fn test_channel() {
     join5.join();
     join6.join();
     join7.join();
-    println!(
-        "!!!!!!len: {:?}, time: {:?}",
-        receiver.len(),
-        Instant::now() - start
-    );
+    println!("!!!!!!len: {:?}, time: {:?}", receiver.len(), Instant::now() - start);
 }
 
 #[test]
@@ -671,11 +663,7 @@ fn test_mpmc_deque() {
     join5.join();
     join6.join();
     join7.join();
-    println!(
-        "!!!!!!len: {:?}, time: {:?}",
-        queue.tail_len(),
-        Instant::now() - start
-    );
+    println!("!!!!!!len: {:?}, time: {:?}", queue.tail_len(), Instant::now() - start);
 
     let sender0 = queue.clone();
     let sender1 = queue.clone();
@@ -831,11 +819,7 @@ fn test_mpsc_deque() {
     join5.join();
     join6.join();
     join7.join();
-    println!(
-        "!!!!!!len: {:?}, time: {:?}",
-        receiver.len(),
-        Instant::now() - start
-    );
+    println!("!!!!!!len: {:?}, time: {:?}", receiver.len(), Instant::now() - start);
 
     let sender0 = sender.clone();
     let sender1 = sender.clone();
@@ -875,11 +859,7 @@ fn test_mpsc_deque() {
         for _ in 0..16000000 {
             receiver.try_recv();
         }
-        println!(
-            "!!!!!!len: {:?}, time: {:?}",
-            receiver.len(),
-            Instant::now() - start
-        );
+        println!("!!!!!!len: {:?}, time: {:?}", receiver.len(), Instant::now() - start);
     });
 
     join0.join();
@@ -966,11 +946,7 @@ fn test_steal_deque() {
     join5.join();
     join6.join();
     join7.join();
-    println!(
-        "!!!!!!len: {:?}, time: {:?}",
-        receiver.len(),
-        Instant::now() - start
-    );
+    println!("!!!!!!len: {:?}, time: {:?}", receiver.len(), Instant::now() - start);
 
     let sender0 = sender.clone();
     let sender1 = sender.clone();
@@ -1013,11 +989,7 @@ fn test_steal_deque() {
 
     let join4 = thread::spawn(move || {
         while let Some(_) = receiver.try_recv() {}
-        println!(
-            "!!!!!!len: {:?}, time: {:?}",
-            receiver.len(),
-            Instant::now() - start
-        );
+        println!("!!!!!!len: {:?}, time: {:?}", receiver.len(), Instant::now() - start);
     });
 
     join4.join();
@@ -1167,21 +1139,13 @@ fn test_dashmap() {
         map.get(&key);
         total += key;
     }
-    println!(
-        "!!!!!!finish, total: {:?}, get time: {:?}",
-        total,
-        Instant::now() - start
-    );
+    println!("!!!!!!finish, total: {:?}, get time: {:?}", total, Instant::now() - start);
 }
 
 struct Counter(i32, Instant);
 impl Drop for Counter {
     fn drop(&mut self) {
-        println!(
-            "!!!!!!drop counter, count: {:?}, time: {:?}",
-            self.0,
-            Instant::now() - self.1
-        );
+        println!("!!!!!!drop counter, count: {:?}, time: {:?}", self.0, Instant::now() - self.1);
     }
 }
 
@@ -1255,54 +1219,14 @@ fn test_atomic() {
     let start = Instant::now();
     for _ in 0..100000000 {
         atomic.compare_exchange(0, 10000000000, Ordering::Acquire, Ordering::Relaxed);
-        atomic.compare_exchange(
-            10000000000,
-            20000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            20000000000,
-            30000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            30000000000,
-            40000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            40000000000,
-            50000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            50000000000,
-            60000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            60000000000,
-            70000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            70000000000,
-            80000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            80000000000,
-            90000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
+        atomic.compare_exchange(10000000000, 20000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(20000000000, 30000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(30000000000, 40000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(40000000000, 50000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(50000000000, 60000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(60000000000, 70000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(70000000000, 80000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(80000000000, 90000000000, Ordering::Acquire, Ordering::Relaxed);
         atomic.compare_exchange(90000000000, 0, Ordering::Acquire, Ordering::Relaxed);
     }
     println!("!!!!!!atomic u64 time: {:?}", Instant::now() - start);
@@ -1311,54 +1235,14 @@ fn test_atomic() {
     let start = Instant::now();
     for _ in 0..100000000 {
         atomic.compare_exchange(0, 10000000000, Ordering::Acquire, Ordering::Relaxed);
-        atomic.compare_exchange(
-            10000000000,
-            20000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            20000000000,
-            30000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            30000000000,
-            40000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            40000000000,
-            50000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            50000000000,
-            60000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            60000000000,
-            70000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            70000000000,
-            80000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
-        atomic.compare_exchange(
-            80000000000,
-            90000000000,
-            Ordering::Acquire,
-            Ordering::Relaxed,
-        );
+        atomic.compare_exchange(10000000000, 20000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(20000000000, 30000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(30000000000, 40000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(40000000000, 50000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(50000000000, 60000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(60000000000, 70000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(70000000000, 80000000000, Ordering::Acquire, Ordering::Relaxed);
+        atomic.compare_exchange(80000000000, 90000000000, Ordering::Acquire, Ordering::Relaxed);
         atomic.compare_exchange(90000000000, 0, Ordering::Acquire, Ordering::Relaxed);
     }
     println!("!!!!!!atomic usize time: {:?}", Instant::now() - start);
@@ -1681,14 +1565,10 @@ fn test_futures_mutex() {
 
 #[test]
 fn test_spin_lock() {
-    let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(2)
-        .set_worker_limit(2, 2);
+    let pool = MultiTaskRuntimeBuilder::default().init_worker_size(2).set_worker_limit(2, 2);
     let rt0 = pool.build();
 
-    let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(2)
-        .set_worker_limit(2, 2);
+    let pool = MultiTaskRuntimeBuilder::default().init_worker_size(2).set_worker_limit(2, 2);
     let rt1 = pool.build();
 
     {
@@ -1994,14 +1874,10 @@ fn test_spin_lock_bench() {
 
 #[test]
 fn test_mutex_lock() {
-    let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(2)
-        .set_worker_limit(2, 2);
+    let pool = MultiTaskRuntimeBuilder::default().init_worker_size(2).set_worker_limit(2, 2);
     let rt0 = pool.build();
 
-    let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(2)
-        .set_worker_limit(2, 2);
+    let pool = MultiTaskRuntimeBuilder::default().init_worker_size(2).set_worker_limit(2, 2);
     let rt1 = pool.build();
 
     {
@@ -2916,14 +2792,10 @@ fn test_mutex_lock_bench() {
 
 #[test]
 fn test_rw_lock() {
-    let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(2)
-        .set_worker_limit(2, 2);
+    let pool = MultiTaskRuntimeBuilder::default().init_worker_size(2).set_worker_limit(2, 2);
     let rt0 = pool.build();
 
-    let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(2)
-        .set_worker_limit(2, 2);
+    let pool = MultiTaskRuntimeBuilder::default().init_worker_size(2).set_worker_limit(2, 2);
     let rt1 = pool.build();
 
     let rt0_ = rt0.clone();
@@ -3224,10 +3096,7 @@ fn test_single_task() {
             *value.0.borrow_mut() += 1;
             rt_copy.wakeup(&id_copy);
         }) {
-            println!(
-                "!!!> spawn waker failed, id: {:?}, uid: {:?}, reason: {:?}",
-                id, uid_copy, e
-            );
+            println!("!!!> spawn waker failed, id: {:?}, uid: {:?}, reason: {:?}", id, uid_copy, e);
         }
     }
 
@@ -3293,10 +3162,7 @@ fn test_multi_task() {
             *value.0.borrow_mut() += 1;
             rt_copy.wakeup(&id_copy);
         }) {
-            println!(
-                "!!!> spawn waker failed, id: {:?}, uid: {:?}, reason: {:?}",
-                id, uid, e
-            );
+            println!("!!!> spawn waker failed, id: {:?}, uid: {:?}, reason: {:?}", id, uid, e);
         }
     }
 
@@ -3330,10 +3196,7 @@ fn test_empty_local_task() {
                 counter_copy.0.fetch_add(1, Ordering::Relaxed);
             });
         }
-        println!(
-            "!!!!!!spawn local task ok, time: {:?}",
-            Instant::now() - start
-        );
+        println!("!!!!!!spawn local task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::sleep(Duration::from_millis(10000));
@@ -3363,10 +3226,7 @@ fn test_empty_local_task() {
             rt.wakeup_once();
             runner.run_once();
         }
-        println!(
-            "!!!!!!spawn local task ok, time: {:?}",
-            Instant::now() - start
-        );
+        println!("!!!!!!spawn local task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::sleep(Duration::from_millis(100000000));
@@ -3379,10 +3239,7 @@ fn loop_local_task(
     time: Instant,
 ) -> LocalBoxFuture<'static, ()> {
     if count >= 10000000 {
-        println!(
-            "!!!!!!spawn local task ok, time: {:?}",
-            Instant::now() - time
-        );
+        println!("!!!!!!spawn local task ok, time: {:?}", Instant::now() - time);
         return async move {}.boxed_local();
     }
 
@@ -3426,10 +3283,7 @@ fn test_empty_single_task() {
                 println!("!!!> spawn empty singale task failed, reason: {:?}", e);
             }
         }
-        println!(
-            "!!!!!!spawn single timing task ok, time: {:?}",
-            Instant::now() - start
-        );
+        println!("!!!!!!spawn single timing task ok, time: {:?}", Instant::now() - start);
     }
 
     thread::sleep(Duration::from_millis(10000));
@@ -3451,10 +3305,7 @@ fn test_empty_single_task() {
             }
             runner.run_once();
         }
-        println!(
-            "!!!!!!spawn single timing task ok, time: {:?}",
-            Instant::now() - start
-        );
+        println!("!!!!!!spawn single timing task ok, time: {:?}", Instant::now() - start);
     });
 
     thread::sleep(Duration::from_millis(100000000));
@@ -3462,9 +3313,7 @@ fn test_empty_single_task() {
 
 #[test]
 fn test_empty_multi_task() {
-    let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(4)
-        .set_worker_limit(4, 4);
+    let pool = MultiTaskRuntimeBuilder::default().init_worker_size(4).set_worker_limit(4, 4);
     let rt = pool.build();
     let rt0 = rt.clone();
     let rt1 = rt.clone();
@@ -3489,10 +3338,7 @@ fn test_empty_multi_task() {
                     println!("!!!> spawn empty singale task failed, reason: {:?}", e);
                 }
             }
-            println!(
-                "!!!!!!spawn single timing task ok 0, time: {:?}",
-                Instant::now() - start
-            );
+            println!("!!!!!!spawn single timing task ok 0, time: {:?}", Instant::now() - start);
         });
 
         thread::spawn(move || {
@@ -3505,10 +3351,7 @@ fn test_empty_multi_task() {
                     println!("!!!> spawn empty singale task failed, reason: {:?}", e);
                 }
             }
-            println!(
-                "!!!!!!spawn single timing task ok 1, time: {:?}",
-                Instant::now() - start
-            );
+            println!("!!!!!!spawn single timing task ok 1, time: {:?}", Instant::now() - start);
         });
 
         thread::spawn(move || {
@@ -3521,10 +3364,7 @@ fn test_empty_multi_task() {
                     println!("!!!> spawn empty singale task failed, reason: {:?}", e);
                 }
             }
-            println!(
-                "!!!!!!spawn single timing task ok 2, time: {:?}",
-                Instant::now() - start
-            );
+            println!("!!!!!!spawn single timing task ok 2, time: {:?}", Instant::now() - start);
         });
 
         thread::spawn(move || {
@@ -3537,10 +3377,7 @@ fn test_empty_multi_task() {
                     println!("!!!> spawn empty singale task failed, reason: {:?}", e);
                 }
             }
-            println!(
-                "!!!!!!spawn single timing task ok 3, time: {:?}",
-                Instant::now() - start
-            );
+            println!("!!!!!!spawn single timing task ok 3, time: {:?}", Instant::now() - start);
         });
     }
 
@@ -3571,10 +3408,7 @@ fn test_single_timing_task() {
                 5000,
             ) {
                 Err(e) => {
-                    println!(
-                        "!!!> spawn task failed, index: {:?}, reason: {:?}",
-                        index, e
-                    );
+                    println!("!!!> spawn task failed, index: {:?}, reason: {:?}", index, e);
                 }
                 Ok(handle) => {
                     if index % 2 != 0 {
@@ -3605,20 +3439,14 @@ fn test_single_timing_task() {
             }
         }
     }
-    println!(
-        "!!!!!!spawn single timing task ok, time: {:?}",
-        Instant::now() - start
-    );
+    println!("!!!!!!spawn single timing task ok, time: {:?}", Instant::now() - start);
 
     //测试取消定时任务的性能
     let start = Instant::now();
     for handle in handles {
         // rt.cancel_timing(handle);
     }
-    println!(
-        "!!!!!!cancel single timing task ok, time: {:?}",
-        Instant::now() - start
-    );
+    println!("!!!!!!cancel single timing task ok, time: {:?}", Instant::now() - start);
 
     thread::sleep(Duration::from_millis(100000000));
 }
@@ -3639,10 +3467,7 @@ fn test_multi_timing_task() {
                 5000,
             ) {
                 Err(e) => {
-                    println!(
-                        "!!!> spawn task failed, index: {:?}, reason: {:?}",
-                        index, e
-                    );
+                    println!("!!!> spawn task failed, index: {:?}, reason: {:?}", index, e);
                 }
                 Ok(handle) => {
                     if index % 2 != 0 {
@@ -3673,20 +3498,14 @@ fn test_multi_timing_task() {
             }
         }
     }
-    println!(
-        "!!!!!!spawn multi timing task ok, time: {:?}",
-        Instant::now() - start
-    );
+    println!("!!!!!!spawn multi timing task ok, time: {:?}", Instant::now() - start);
 
     //测试取消定时任务的性能
     let start = Instant::now();
     for handle in handles {
         // rt.cancel_timing(handle);
     }
-    println!(
-        "!!!!!!cancel multi timing task ok, time: {:?}",
-        Instant::now() - start
-    );
+    println!("!!!!!!cancel multi timing task ok, time: {:?}", Instant::now() - start);
 
     thread::sleep(Duration::from_millis(100000000));
 }
@@ -3706,10 +3525,7 @@ fn test_flume() {
         thread::sleep(Duration::from_millis(1));
     });
 
-    let rt = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(4)
-        .set_worker_limit(4, 4)
-        .build();
+    let rt = MultiTaskRuntimeBuilder::default().init_worker_size(4).set_worker_limit(4, 4).build();
 
     {
         let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
@@ -3832,10 +3648,7 @@ fn test_async_channel_performance() {
         thread::sleep(Duration::from_millis(1));
     });
 
-    let rt = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(4)
-        .set_worker_limit(4, 4)
-        .build();
+    let rt = MultiTaskRuntimeBuilder::default().init_worker_size(4).set_worker_limit(4, 4).build();
 
     {
         let counter = Arc::new(AtomicCounter(AtomicUsize::new(0), Instant::now()));
@@ -4212,9 +4025,7 @@ fn test_async_value() {
         thread::sleep(Duration::from_millis(1));
     });
 
-    let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(4)
-        .set_worker_limit(4, 4);
+    let pool = MultiTaskRuntimeBuilder::default().init_worker_size(4).set_worker_limit(4, 4);
     let rt1 = pool.build();
 
     {
@@ -4439,9 +4250,7 @@ fn test_async_value_non_blocking() {
         thread::sleep(Duration::from_millis(1));
     });
 
-    let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(4)
-        .set_worker_limit(4, 4);
+    let pool = MultiTaskRuntimeBuilder::default().init_worker_size(4).set_worker_limit(4, 4);
     let rt1 = pool.build();
 
     {
@@ -4687,9 +4496,7 @@ fn test_async_variable() {
         thread::sleep(Duration::from_millis(1));
     });
 
-    let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(4)
-        .set_worker_limit(4, 4);
+    let pool = MultiTaskRuntimeBuilder::default().init_worker_size(4).set_worker_limit(4, 4);
     let rt1 = pool.build();
 
     {
@@ -5030,9 +4837,7 @@ fn test_async_variable_non_blocking() {
         thread::sleep(Duration::from_millis(1));
     });
 
-    let pool = MultiTaskRuntimeBuilder::default()
-        .init_worker_size(4)
-        .set_worker_limit(4, 4);
+    let pool = MultiTaskRuntimeBuilder::default().init_worker_size(4).set_worker_limit(4, 4);
     let rt1 = pool.build();
 
     {
@@ -6137,14 +5942,10 @@ fn test_async_wait_all() {
             let mut map_reduce = rt_copy.map_reduce(10);
 
             let cb: SendableFn = SendableFn(Box::new(move |v: &mut Vec<u8>| v.clone()));
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(cb) })
-                .unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(cb) }).unwrap();
 
             let cb: SendableFn = SendableFn(Box::new(move |v: &mut Vec<u8>| v.clone()));
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(cb) })
-                .unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(cb) }).unwrap();
 
             let mut vec = vec![0xff, 0xff, 0xff];
             for r in map_reduce.reduce(true).await.unwrap() {
@@ -6163,75 +5964,32 @@ fn test_async_wait_all() {
         let rt1_copy = rt1.clone();
         let future = async move {
             let mut map_reduce = rt_copy.map_reduce(10);
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(0) })
-                .unwrap();
-            map_reduce
-                .map(rt1_copy.clone(), async move { Ok(1) })
-                .unwrap();
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(2) })
-                .unwrap();
-            map_reduce
-                .map(rt1_copy.clone(), async move { Ok(3) })
-                .unwrap();
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(4) })
-                .unwrap();
-            map_reduce
-                .map(rt1_copy.clone(), async move { Ok(5) })
-                .unwrap();
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(6) })
-                .unwrap();
-            map_reduce
-                .map(rt1_copy.clone(), async move { Ok(7) })
-                .unwrap();
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(8) })
-                .unwrap();
-            map_reduce
-                .map(rt1_copy.clone(), async move { Ok(9) })
-                .unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(0) }).unwrap();
+            map_reduce.map(rt1_copy.clone(), async move { Ok(1) }).unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(2) }).unwrap();
+            map_reduce.map(rt1_copy.clone(), async move { Ok(3) }).unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(4) }).unwrap();
+            map_reduce.map(rt1_copy.clone(), async move { Ok(5) }).unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(6) }).unwrap();
+            map_reduce.map(rt1_copy.clone(), async move { Ok(7) }).unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(8) }).unwrap();
+            map_reduce.map(rt1_copy.clone(), async move { Ok(9) }).unwrap();
 
             println!("!!!!!!map result: {:?}", map_reduce.reduce(false).await);
 
             let mut map_reduce = rt_copy.map_reduce(10);
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(0) })
-                .unwrap();
-            map_reduce
-                .map(rt1_copy.clone(), async move { Ok(1) })
-                .unwrap();
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(2) })
-                .unwrap();
-            map_reduce
-                .map(rt1_copy.clone(), async move { Ok(3) })
-                .unwrap();
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(4) })
-                .unwrap();
-            map_reduce
-                .map(rt1_copy.clone(), async move { Ok(5) })
-                .unwrap();
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(6) })
-                .unwrap();
-            map_reduce
-                .map(rt1_copy.clone(), async move { Ok(7) })
-                .unwrap();
-            map_reduce
-                .map(rt0_copy.clone(), async move { Ok(8) })
-                .unwrap();
-            map_reduce
-                .map(rt1_copy.clone(), async move { Ok(9) })
-                .unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(0) }).unwrap();
+            map_reduce.map(rt1_copy.clone(), async move { Ok(1) }).unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(2) }).unwrap();
+            map_reduce.map(rt1_copy.clone(), async move { Ok(3) }).unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(4) }).unwrap();
+            map_reduce.map(rt1_copy.clone(), async move { Ok(5) }).unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(6) }).unwrap();
+            map_reduce.map(rt1_copy.clone(), async move { Ok(7) }).unwrap();
+            map_reduce.map(rt0_copy.clone(), async move { Ok(8) }).unwrap();
+            map_reduce.map(rt1_copy.clone(), async move { Ok(9) }).unwrap();
 
-            println!(
-                "!!!!!!map result by order: {:?}",
-                map_reduce.reduce(true).await
-            );
+            println!("!!!!!!map result by order: {:?}", map_reduce.reduce(true).await);
         };
         rt.spawn(rt.alloc(), future);
     }
@@ -6245,36 +6003,16 @@ fn test_async_wait_all() {
             let counter_copy = counter.clone();
             let future = async move {
                 let mut map_reduce = rt0_copy.map_reduce(10);
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(0) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(1) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(2) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(3) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(4) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(5) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(6) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(7) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(8) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(9) })
-                    .unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(0) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(1) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(2) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(3) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(4) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(5) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(6) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(7) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(8) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(9) }).unwrap();
                 if let Ok(_) = map_reduce.reduce(true).await {
                     counter_copy.0.fetch_add(1, Ordering::Relaxed);
                 }
@@ -6295,36 +6033,16 @@ fn test_async_wait_all() {
             let counter_copy = counter.clone();
             let future = async move {
                 let mut map_reduce = rt_copy.map_reduce(10);
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(0) })
-                    .unwrap();
-                map_reduce
-                    .map(rt1_copy.clone(), async move { Ok(1) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(2) })
-                    .unwrap();
-                map_reduce
-                    .map(rt1_copy.clone(), async move { Ok(3) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(4) })
-                    .unwrap();
-                map_reduce
-                    .map(rt1_copy.clone(), async move { Ok(5) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(6) })
-                    .unwrap();
-                map_reduce
-                    .map(rt1_copy.clone(), async move { Ok(7) })
-                    .unwrap();
-                map_reduce
-                    .map(rt0_copy.clone(), async move { Ok(8) })
-                    .unwrap();
-                map_reduce
-                    .map(rt1_copy.clone(), async move { Ok(9) })
-                    .unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(0) }).unwrap();
+                map_reduce.map(rt1_copy.clone(), async move { Ok(1) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(2) }).unwrap();
+                map_reduce.map(rt1_copy.clone(), async move { Ok(3) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(4) }).unwrap();
+                map_reduce.map(rt1_copy.clone(), async move { Ok(5) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(6) }).unwrap();
+                map_reduce.map(rt1_copy.clone(), async move { Ok(7) }).unwrap();
+                map_reduce.map(rt0_copy.clone(), async move { Ok(8) }).unwrap();
+                map_reduce.map(rt1_copy.clone(), async move { Ok(9) }).unwrap();
                 if let Ok(_) = map_reduce.reduce(true).await {
                     counter_copy.0.fetch_add(1, Ordering::Relaxed);
                 }
@@ -6410,11 +6128,9 @@ fn test_panic_handler() {
         panic!("Test panic!, {}", true);
     }
 
-    thread::Builder::new()
-        .name("Test panic thread".to_string())
-        .spawn(|| {
-            test();
-        });
+    thread::Builder::new().name("Test panic thread".to_string()).spawn(|| {
+        test();
+    });
 
     thread::sleep(Duration::from_millis(10000));
 }
@@ -6564,20 +6280,14 @@ fn test_async_pipeline() {
             loop {
                 if let Err(e) = down_stream.feed(frame.to_string() + " ok").await {
                     if e.kind() != ErrorKind::WouldBlock {
-                        panic!(
-                            "Down stream feed failed, frame: {:?}, reason: {:?}",
-                            frame, e
-                        );
+                        panic!("Down stream feed failed, frame: {:?}, reason: {:?}", frame, e);
                     }
                     continue;
                 }
 
                 if let Err(e) = down_stream.flush().await {
                     if e.kind() != ErrorKind::WouldBlock {
-                        panic!(
-                            "Down stream flush failed, frame: {:?}, reason: {:?}",
-                            frame, e
-                        );
+                        panic!("Down stream flush failed, frame: {:?}, reason: {:?}", frame, e);
                     }
                     continue;
                 }
@@ -6613,10 +6323,7 @@ fn test_async_pipeline() {
 
                 if let Err(e) = up_stream.flush().await {
                     if e.kind() != ErrorKind::WouldBlock {
-                        panic!(
-                            "Up stream flush failed, frame: {:?}, reason: {:?}",
-                            frame, e
-                        );
+                        panic!("Up stream flush failed, frame: {:?}, reason: {:?}", frame, e);
                     }
                     continue;
                 }
@@ -6665,20 +6372,14 @@ fn test_async_pipeline_once() {
             loop {
                 if let Err(e) = down_stream.feed(frame.to_string() + " ok").await {
                     if e.kind() != ErrorKind::WouldBlock {
-                        panic!(
-                            "Down stream feed failed, frame: {:?}, reason: {:?}",
-                            frame, e
-                        );
+                        panic!("Down stream feed failed, frame: {:?}, reason: {:?}", frame, e);
                     }
                     continue;
                 }
 
                 if let Err(e) = down_stream.flush().await {
                     if e.kind() != ErrorKind::WouldBlock {
-                        panic!(
-                            "Down stream flush failed, frame: {:?}, reason: {:?}",
-                            frame, e
-                        );
+                        panic!("Down stream flush failed, frame: {:?}, reason: {:?}", frame, e);
                     }
                     continue;
                 }
@@ -6714,10 +6415,7 @@ fn test_async_pipeline_once() {
 
                 if let Err(e) = up_stream.flush().await {
                     if e.kind() != ErrorKind::WouldBlock {
-                        panic!(
-                            "Up stream flush failed, frame: {:?}, reason: {:?}",
-                            frame, e
-                        );
+                        panic!("Up stream flush failed, frame: {:?}, reason: {:?}", frame, e);
                     }
                     continue;
                 }

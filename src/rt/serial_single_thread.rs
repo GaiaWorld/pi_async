@@ -1,9 +1,26 @@
-//! 单线程运行时
+//! # 单线程运行时
 //!
+//! # 特征:
+//!
+//! - [SingleTaskPool]\: 单线程任务池
+//! - [SingleTaskRunner]\: 单线程异步任务执行器
+//! - [SingleTaskRuntime]\: 异步单线程任务运行时
+//!
+//! [SingleTaskPool]: struct.SingleTaskPool.html
+//! [SingleTaskRunner]: struct.SingleTaskRunner.html
+//! [SingleTaskRuntime]: struct.SingleTaskRuntime.html
+//!
+//! # Examples
+//!
+//! ```
+//! use pi_async::prelude::{SingleTaskPool, SingleTaskRunner};
+//! let pool = SingleTaskPool::default();
+//! let rt = SingleTaskRunner::<(), SingleTaskPool<()>>::new(pool).into_local();
+//! let _ = rt.block_on(async {});
+//! ```
 
 use std::any::Any;
-use std::cell::RefCell;
-use std::cell::UnsafeCell;
+use std::cell::{RefCell, UnsafeCell};
 use std::future::Future;
 use std::io::{Error, ErrorKind, Result};
 use std::mem::transmute;
@@ -15,33 +32,22 @@ use std::vec::IntoIter;
 use async_stream::stream;
 use crossbeam_channel::{bounded, unbounded, Sender};
 use flume::bounded as async_bounded;
-use futures::{
-    future::{FutureExt, LocalBoxFuture},
-    stream::{LocalBoxStream, Stream, StreamExt},
-    task::{waker_ref, ArcWake},
-};
+use futures::future::{FutureExt, LocalBoxFuture};
+use futures::stream::{LocalBoxStream, Stream, StreamExt};
+use futures::task::{waker_ref, ArcWake};
 use parking_lot::{Condvar, Mutex};
 
-use crate::{
-    lock::{
-        mpsc_deque::{mpsc_deque, Receiver as MpscRecv, Sender as MpscSent},
-        spin,
-    },
-    rt::{
-        alloc_rt_uid,
-        serial::{
-            bind_local_thread, local_async_runtime, AsyncMapReduce, AsyncRuntime, AsyncRuntimeExt,
-            AsyncTask, AsyncTaskPool, AsyncTaskPoolExt, AsyncTaskTimer, AsyncTimingTask, AsyncWait,
-            AsyncWaitAny, AsyncWaitAnyCallback, AsyncWaitResult, AsyncWaitTimeout,
-            LocalAsyncRuntime,
-        },
-        AsyncPipelineResult, TaskId,
-    },
+use crate::lock::mpsc_deque::{mpsc_deque, Receiver as MpscRecv, Sender as MpscSent};
+use crate::lock::spin;
+use crate::rt::serial::{
+    bind_local_thread, local_async_runtime, AsyncMapReduce, AsyncRuntime, AsyncRuntimeExt,
+    AsyncTask, AsyncTaskPool, AsyncTaskPoolExt, AsyncTaskTimer, AsyncTimingTask, AsyncWait,
+    AsyncWaitAny, AsyncWaitAnyCallback, AsyncWaitResult, AsyncWaitTimeout, LocalAsyncRuntime,
 };
+use crate::rt::{alloc_rt_uid, AsyncPipelineResult, TaskId};
 
 ///
 /// 单线程任务池
-///
 pub struct SingleTaskPool<O: Default + 'static> {
     id: usize,                                                              //绑定的线程唯一id
     consumer: Arc<RefCell<MpscRecv<Arc<AsyncTask<SingleTaskPool<O>, O>>>>>, //任务消费者
@@ -80,11 +86,7 @@ impl<O: Default + 'static> Default for SingleTaskPool<O> {
             producer: Arc::new(producer),
             consume_count,
             produce_count,
-            thread_waker: Some(Arc::new((
-                AtomicBool::new(false),
-                Mutex::new(()),
-                Condvar::new(),
-            ))),
+            thread_waker: Some(Arc::new((AtomicBool::new(false), Mutex::new(()), Condvar::new()))),
         }
     }
 }
@@ -159,7 +161,6 @@ impl<O: Default + 'static> AsyncTaskPoolExt<O> for SingleTaskPool<O> {
 
 ///
 /// 异步单线程任务运行时
-///
 pub struct SingleTaskRuntime<
     O: Default + 'static = (),
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = SingleTaskPool<O>,
@@ -254,9 +255,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
 
     /// 挂起指定唯一id的异步任务
     fn pending<Output>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output> {
-        task_id
-            .0
-            .store(Box::into_raw(Box::new(waker)) as usize, Ordering::Relaxed);
+        task_id.0.store(Box::into_raw(Box::new(waker)) as usize, Ordering::Relaxed);
         Poll::Pending
     }
 
@@ -271,19 +270,28 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
         }
     }
 
-    /// 挂起当前异步运行时的当前任务，并在指定的其它运行时上派发一个指定的异步任务，等待其它运行时上的异步任务完成后，唤醒当前运行时的当前任务，并返回其它运行时上的异步任务的值
+    /// 挂起当前异步运行时的当前任务，
+    /// 并在指定的其它运行时上派发一个指定的异步任务，
+    /// 等待其它运行时上的异步任务完成后，唤醒当前运行时的当前任务，
+    /// 并返回其它运行时上的异步任务的值
     fn wait<V: 'static>(&self) -> AsyncWait<V> {
         AsyncWait::new(self.wait_any(2))
     }
 
-    /// 挂起当前异步运行时的当前任务，并在多个其它运行时上执行多个其它任务，其中任意一个任务完成，则唤醒当前运行时的当前任务，并返回这个已完成任务的值，而其它未完成的任务的值将被忽略
+    /// 挂起当前异步运行时的当前任务，并在多个其它运行时上执行多个其它任务，
+    /// 其中任意一个任务完成，则唤醒当前运行时的当前任务，
+    /// 并返回这个已完成任务的值，而其它未完成的任务的值将被忽略
     fn wait_any<V: 'static>(&self, capacity: usize) -> AsyncWaitAny<V> {
         let (producor, consumer) = async_bounded(capacity);
 
         AsyncWaitAny::new(capacity, producor, consumer)
     }
 
-    /// 挂起当前异步运行时的当前任务，并在多个其它运行时上执行多个其它任务，任务返回后需要通过用户指定的检查回调进行检查，其中任意一个任务检查通过，则唤醒当前运行时的当前任务，并返回这个已完成任务的值，而其它未完成或未检查通过的任务的值将被忽略，如果所有任务都未检查通过，则强制唤醒当前运行时的当前任务
+    /// 挂起当前异步运行时的当前任务，并在多个其它运行时上执行多个其它任务，
+    /// 任务返回后需要通过用户指定的检查回调进行检查，其中任意一个任务检查通过，
+    /// 则唤醒当前运行时的当前任务，并返回这个已完成任务的值，
+    /// 而其它未完成或未检查通过的任务的值将被忽略，如果所有任务都未检查通过，
+    /// 则强制唤醒当前运行时的当前任务
     fn wait_any_callback<V: 'static>(&self, capacity: usize) -> AsyncWaitAnyCallback<V> {
         let (producor, consumer) = async_bounded(capacity);
 
@@ -393,10 +401,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
 
             Default::default()
         }) {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("Block on failed, reason: {:?}", e),
-            ));
+            return Err(Error::new(ErrorKind::Other, format!("Block on failed, reason: {:?}", e)));
         }
 
         let mut count = 0;
@@ -539,7 +544,6 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
 
 ///
 /// 单线程异步任务执行器
-///
 pub struct SingleTaskRunner<
     O: Default + 'static,
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = SingleTaskPool<O>,
@@ -579,10 +583,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
         //构建单线程任务运行时
         let runtime = SingleTaskRuntime(Arc::new((rt_uid, pool, producor, timer)));
 
-        SingleTaskRunner {
-            is_running: AtomicBool::new(false),
-            runtime,
-        }
+        SingleTaskRunner { is_running: AtomicBool::new(false), runtime }
     }
 
     /// 获取单线程异步任务执行器的线程唤醒器
@@ -593,9 +594,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
     /// 启动单线程异步任务执行器
     pub fn startup(&self) -> Option<SingleTaskRuntime<O, P>> {
         if cfg!(target_arch = "aarch64") {
-            match self
-                .is_running
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            match self.is_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             {
                 Ok(false) => {
                     //未启动，则启动，并返回单线程异步运行时
@@ -629,10 +628,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
     pub fn run_once(&self) -> Result<usize> {
         if !self.is_running.load(Ordering::Relaxed) {
             //未启动，则返回错误原因
-            return Err(Error::new(
-                ErrorKind::Other,
-                "Single thread runtime not running",
-            ));
+            return Err(Error::new(ErrorKind::Other, "Single thread runtime not running"));
         }
 
         //设置新的定时任务，并唤醒已过期的定时任务
@@ -684,10 +680,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
     pub fn run(&self) -> Result<usize> {
         if !self.is_running.load(Ordering::Relaxed) {
             //未启动，则返回错误原因
-            return Err(Error::new(
-                ErrorKind::Other,
-                "Single thread runtime not running",
-            ));
+            return Err(Error::new(ErrorKind::Other, "Single thread runtime not running"));
         }
 
         //获取当前任务池中的所有异步任务
@@ -720,7 +713,8 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
                         }
 
                         if let Some(task) = tasks.next() {
-                            //执行当前所有异步任务中的一个异步任务，避免定时异步任务占用当前运行时的所有执行时间
+                            //执行当前所有异步任务中的一个异步任务，
+                            // 避免定时异步任务占用当前运行时的所有执行时间
                             run_task(task);
                         }
                     } else {
@@ -760,7 +754,8 @@ fn run_task<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool
     let mut context = Context::from_waker(&*waker);
     if let Some(mut future) = task.get_inner() {
         if let Poll::Pending = future.as_mut().poll(&mut context) {
-            //当前未准备好，则恢复异步任务，以保证异步服务后续访问异步任务和异步任务不被提前释放
+            //当前未准备好，则恢复异步任务，
+            // 以保证异步服务后续访问异步任务和异步任务不被提前释放
             task.set_inner(Some(future));
         }
     }
@@ -768,14 +763,14 @@ fn run_task<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool
 
 #[test]
 fn test_single_runtime() {
+    use std::time::{Duration, Instant};
+    use std::{mem, thread};
+
     use crate::rt::{
         clear_local_dict, get_local_dict, get_local_dict_mut, remove_local_dict, set_local_dict,
         spawn_local,
     };
     use crate::tests::test_lib::AtomicCounter;
-    use std::mem;
-    use std::thread;
-    use std::time::{Duration, Instant};
 
     let rt_uid = alloc_rt_uid();
     let (producer, consumer) = mpsc_deque();

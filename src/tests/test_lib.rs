@@ -26,12 +26,7 @@ impl Drop for AtomicCounter {
 impl AtomicCounter {
     pub(crate) fn new(correct_count: usize) -> Self {
         let now = Instant::now();
-        AtomicCounter(
-            AtomicUsize::new(0),
-            now,
-            Arc::new(AtomicBool::new(false)),
-            correct_count,
-        )
+        AtomicCounter(AtomicUsize::new(0), now, Arc::new(AtomicBool::new(false)), correct_count)
     }
 
     pub(crate) fn fetch_add(&self, val: usize) -> usize {

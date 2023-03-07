@@ -1,25 +1,25 @@
 //! # 提供了通用的异步运行时
 //!
 
-use std::thread;
-use std::rc::Rc;
-use std::pin::Pin;
-use std::vec::IntoIter;
-use std::future::Future;
-use std::mem::transmute;
-use std::sync::{Arc, Weak};
+use std::alloc::{set_alloc_error_hook, Layout};
 use std::any::{Any, TypeId};
-use std::marker::PhantomData;
-use std::ptr::{null, null_mut};
 use std::cell::{RefCell, UnsafeCell};
-use std::panic::{PanicInfo, set_hook};
-use std::task::{Waker, Context, Poll};
-use std::io::{Error, Result, ErrorKind};
-use std::alloc::{Layout, set_alloc_error_hook};
-use std::time::{Duration, SystemTime};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::future::Future;
+use std::io::{Error, ErrorKind, Result};
+use std::marker::PhantomData;
+use std::mem::transmute;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, AtomicIsize, AtomicPtr, Ordering};
+use std::panic::{set_hook, PanicInfo};
+use std::pin::Pin;
+use std::ptr::{null, null_mut};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::task::{Context, Poll, Waker};
+use std::thread;
+use std::time::{Duration, SystemTime};
+use std::vec::IntoIter;
 
 pub mod single_thread;
 pub mod multi_thread;
@@ -30,25 +30,27 @@ pub mod serial_local_thread;
 pub mod serial_single_thread;
 pub mod serial_worker_thread;
 
-use libc;
-use futures::{future::{FutureExt, BoxFuture},
-              stream::{Stream, BoxStream},
-              task::ArcWake};
-use parking_lot::{Mutex, Condvar};
-use crossbeam_channel::{Sender, Receiver, unbounded};
-use crossbeam_queue::ArrayQueue;
-use flume::{Sender as AsyncSender, Receiver as AsyncReceiver, bounded as async_bounded};
-use num_cpus;
 use backtrace::Backtrace;
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_queue::ArrayQueue;
+use flume::{bounded as async_bounded, Receiver as AsyncReceiver, Sender as AsyncSender};
+use futures::{
+    future::{BoxFuture, FutureExt},
+    stream::{BoxStream, Stream},
+    task::ArcWake,
+};
+use libc;
+use num_cpus;
+use parking_lot::{Condvar, Mutex};
 use slotmap::{Key, KeyData};
 
-use pi_time::Instant;
-use pi_hash::XHashMap;
 use pi_cancel_timer::Timer;
+use pi_hash::XHashMap;
+use pi_time::Instant;
 
+use multi_thread::{MultiTaskRuntime, MultiTaskRuntimeBuilder, StealableTaskPool};
 use single_thread::{SingleTaskPool, SingleTaskRunner, SingleTaskRuntime};
-use multi_thread::{StealableTaskPool, MultiTaskRuntimeBuilder, MultiTaskRuntime};
-use worker_thread::{WorkerTaskRunner, WorkerRuntime};
+use worker_thread::{WorkerRuntime, WorkerTaskRunner};
 
 use crate::lock::spin;
 use crate::lock::spin_lock::SpinLock;
@@ -88,29 +90,25 @@ impl Debug for TaskId {
 ///
 /// 异步任务
 ///
-pub struct AsyncTask<
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static = (),
-> {
-    uid:        TaskId,                                 //任务唯一id
-    future:     Mutex<Option<BoxFuture<'static, O>>>,   //异步任务
-    pool:       Arc<P>,                                 //异步任务池
-    context:    Option<UnsafeCell<Box<dyn Any>>>,       //异步任务上下文
+pub struct AsyncTask<P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static = ()> {
+    uid: TaskId,                                  //任务唯一id
+    future: Mutex<Option<BoxFuture<'static, O>>>, //异步任务
+    pool: Arc<P>,                                 //异步任务池
+    context: Option<UnsafeCell<Box<dyn Any>>>,    //异步任务上下文
 }
 
-unsafe impl<
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static,
-> Send for AsyncTask<P, O> {}
-unsafe impl<
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static,
-> Sync for AsyncTask<P, O> {}
+unsafe impl<P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static> Send
+    for AsyncTask<P, O>
+{
+}
+unsafe impl<P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static> Sync
+    for AsyncTask<P, O>
+{
+}
 
-impl<
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-    O: Default + 'static,
-> ArcWake for AsyncTask<P, O> {
+impl<P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>, O: Default + 'static> ArcWake
+    for AsyncTask<P, O>
+{
     #[cfg(not(target_arch = "aarch64"))]
     fn wake_by_ref(arc_self: &Arc<Self>) {
         let pool = arc_self.get_pool();
@@ -124,11 +122,12 @@ impl<
                 let locked = lock.lock();
                 if is_sleep.load(Ordering::Relaxed) {
                     //待唤醒的工作者，正在休眠，则立即唤醒此工作者
-                    if let Ok(true) = is_sleep
-                        .compare_exchange_weak(true,
-                                               false,
-                                               Ordering::SeqCst,
-                                               Ordering::SeqCst) {
+                    if let Ok(true) = is_sleep.compare_exchange_weak(
+                        true,
+                        false,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
                         //确认需要唤醒，则唤醒
                         condvar.notify_one();
                     }
@@ -142,11 +141,12 @@ impl<
                     let (is_sleep, lock, condvar) = &**thread_waker;
                     let locked = lock.lock();
                     //待唤醒的线程，正在休眠，则立即唤醒此线程
-                    if let Ok(true) = is_sleep
-                        .compare_exchange_weak(true,
-                                               false,
-                                               Ordering::SeqCst,
-                                               Ordering::SeqCst) {
+                    if let Ok(true) = is_sleep.compare_exchange_weak(
+                        true,
+                        false,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
                         //确认需要唤醒，则唤醒
                         condvar.notify_one();
                     }
@@ -167,11 +167,9 @@ impl<
                 let locked = lock.lock();
                 if is_sleep.load(Ordering::Relaxed) {
                     //待唤醒的工作者，正在休眠，则立即唤醒此工作者
-                    if let Ok(true) = is_sleep
-                        .compare_exchange(true,
-                                          false,
-                                          Ordering::SeqCst,
-                                          Ordering::SeqCst) {
+                    if let Ok(true) =
+                        is_sleep.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                    {
                         //确认需要唤醒，则唤醒
                         condvar.notify_one();
                     }
@@ -185,11 +183,9 @@ impl<
                     let (is_sleep, lock, condvar) = &**thread_waker;
                     let locked = lock.lock();
                     //待唤醒的线程，正在休眠，则立即唤醒此线程
-                    if let Ok(true) = is_sleep
-                        .compare_exchange(true,
-                                          false,
-                                          Ordering::SeqCst,
-                                          Ordering::SeqCst) {
+                    if let Ok(true) =
+                        is_sleep.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                    {
                         //确认需要唤醒，则唤醒
                         condvar.notify_one();
                     }
@@ -199,43 +195,38 @@ impl<
     }
 }
 
-impl<
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-    O: Default + 'static,
-> AsyncTask<P, O> {
+impl<P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>, O: Default + 'static> AsyncTask<P, O> {
     /// 构建单线程任务
-    pub fn new(uid: TaskId,
-               pool: Arc<P>,
-               future: Option<BoxFuture<'static, O>>) -> AsyncTask<P, O> {
-        AsyncTask {
-            uid,
-            future: Mutex::new(future),
-            pool,
-            context: None,
-        }
+    pub fn new(
+        uid: TaskId,
+        pool: Arc<P>,
+        future: Option<BoxFuture<'static, O>>,
+    ) -> AsyncTask<P, O> {
+        AsyncTask { uid, future: Mutex::new(future), pool, context: None }
     }
 
     /// 使用指定上下文构建单线程任务
-    pub fn with_context<C: 'static>(uid: TaskId,
-                                    pool: Arc<P>,
-                                    future: Option<BoxFuture<'static, O>>,
-                                    context: C) -> AsyncTask<P, O> {
+    pub fn with_context<C: 'static>(
+        uid: TaskId,
+        pool: Arc<P>,
+        future: Option<BoxFuture<'static, O>>,
+        context: C,
+    ) -> AsyncTask<P, O> {
         let any = Box::new(context);
 
-        AsyncTask {
-            uid,
-            future: Mutex::new(future),
-            pool,
-            context: Some(UnsafeCell::new(any)),
-        }
+        AsyncTask { uid, future: Mutex::new(future), pool, context: Some(UnsafeCell::new(any)) }
     }
 
     /// 使用指定异步运行时和上下文构建单线程任务
-    pub fn with_runtime_and_context<RT, C>(runtime: &RT,
-                                           future: Option<BoxFuture<'static, O>>,
-                                           context: C) -> AsyncTask<P, O>
-        where RT: AsyncRuntime<O, Pool = P>,
-              C: 'static {
+    pub fn with_runtime_and_context<RT, C>(
+        runtime: &RT,
+        future: Option<BoxFuture<'static, O>>,
+        context: C,
+    ) -> AsyncTask<P, O>
+    where
+        RT: AsyncRuntime<O, Pool = P>,
+        C: 'static,
+    {
         let any = Box::new(context);
 
         AsyncTask {
@@ -296,7 +287,9 @@ impl<
 
             //设置新的上下文
             let any: Box<dyn Any + 'static> = Box::new(new);
-            unsafe { *context.get() = any; }
+            unsafe {
+                *context.get() = any;
+            }
         }
     }
 
@@ -342,8 +335,7 @@ pub trait AsyncTaskPool<O: Default + 'static = ()>: Default + Send + Sync + 'sta
 ///
 pub trait AsyncTaskPoolExt<O: Default + 'static = ()>: Send + Sync + 'static {
     /// 设置待唤醒的工作者唤醒器队列
-    fn set_waits(&mut self,
-                 _waits: Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>) {}
+    fn set_waits(&mut self, _waits: Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>) {}
 
     /// 获取待唤醒的工作者唤醒器队列
     fn get_waits(&self) -> Option<&Arc<ArrayQueue<Arc<(AtomicBool, Mutex<()>, Condvar)>>>> {
@@ -418,11 +410,13 @@ pub trait AsyncRuntime<O: Default + 'static = ()>: Clone + Send + Sync + 'static
 
     /// 派发一个指定的异步任务到异步运行时
     fn spawn<F>(&self, task_id: TaskId, future: F) -> Result<()>
-        where F: Future<Output = O> + Send + 'static;
+    where
+        F: Future<Output = O> + Send + 'static;
 
     /// 派发一个在指定时间后执行的异步任务到异步运行时，时间单位ms
     fn spawn_timing<F>(&self, task_id: TaskId, future: F, time: usize) -> Result<()>
-        where F: Future<Output = O> + Send + 'static;
+    where
+        F: Future<Output = O> + Send + 'static;
 
     /// 挂起指定唯一id的异步任务
     fn pending<Output>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output>;
@@ -447,10 +441,11 @@ pub trait AsyncRuntime<O: Default + 'static = ()>: Clone + Send + Sync + 'static
 
     /// 生成一个异步管道，输入指定流，输入流的每个值通过过滤器生成输出流的值
     fn pipeline<S, SO, F, FO>(&self, input: S, filter: F) -> BoxStream<'static, FO>
-        where S: Stream<Item = SO> + Send + 'static,
-              SO: Send + 'static,
-              F: FnMut(SO) -> AsyncPipelineResult<FO> + Send + 'static,
-              FO: Send + 'static;
+    where
+        S: Stream<Item = SO> + Send + 'static,
+        SO: Send + 'static,
+        F: FnMut(SO) -> AsyncPipelineResult<FO> + Send + 'static,
+        FO: Send + 'static;
 
     /// 关闭异步运行时，返回请求关闭是否成功
     fn close(&self) -> bool;
@@ -461,26 +456,28 @@ pub trait AsyncRuntime<O: Default + 'static = ()>: Clone + Send + Sync + 'static
 ///
 pub trait AsyncRuntimeExt<O: Default + 'static = ()> {
     /// 派发一个指定的异步任务到异步运行时，并指定异步任务的初始化上下文
-    fn spawn_with_context<F, C>(&self,
-                                task_id: TaskId,
-                                future: F,
-                                context: C) -> Result<()>
-        where F: Future<Output = O> + Send + 'static,
-              C: 'static;
+    fn spawn_with_context<F, C>(&self, task_id: TaskId, future: F, context: C) -> Result<()>
+    where
+        F: Future<Output = O> + Send + 'static,
+        C: 'static;
 
     /// 派发一个在指定时间后执行的异步任务到异步运行时，并指定异步任务的初始化上下文，时间单位ms
-    fn spawn_timing_with_context<F, C>(&self,
-                                       task_id: TaskId,
-                                       future: F,
-                                       context: C,
-                                       time: usize) -> Result<()>
-        where F: Future<Output = O> + Send + 'static,
-              C: 'static;
+    fn spawn_timing_with_context<F, C>(
+        &self,
+        task_id: TaskId,
+        future: F,
+        context: C,
+        time: usize,
+    ) -> Result<()>
+    where
+        F: Future<Output = O> + Send + 'static,
+        C: 'static;
 
     /// 立即创建一个指定任务池的异步运行时，并执行指定的异步任务，阻塞当前线程，等待异步任务完成后返回
     fn block_on<F>(&self, future: F) -> Result<F::Output>
-        where F: Future + Send + 'static,
-              <F as Future>::Output: Default + Send + 'static;
+    where
+        F: Future + Send + 'static,
+        <F as Future>::Output: Default + Send + 'static;
 }
 
 ///
@@ -490,10 +487,12 @@ pub struct AsyncRuntimeBuilder<O: Default + 'static = ()>(PhantomData<O>);
 
 impl<O: Default + 'static> AsyncRuntimeBuilder<O> {
     /// 构建默认的工作者异步运行时
-    pub fn default_worker_thread(worker_name: Option<&str>,
-                                 worker_stack_size: Option<usize>,
-                                 worker_sleep_timeout: Option<u64>,
-                                 worker_loop_interval: Option<Option<u64>>) -> WorkerRuntime<O> {
+    pub fn default_worker_thread(
+        worker_name: Option<&str>,
+        worker_stack_size: Option<usize>,
+        worker_sleep_timeout: Option<u64>,
+        worker_loop_interval: Option<Option<u64>>,
+    ) -> WorkerRuntime<O> {
         let runner = WorkerTaskRunner::default();
 
         let thread_name = if let Some(name) = worker_name {
@@ -534,36 +533,34 @@ impl<O: Default + 'static> AsyncRuntimeBuilder<O> {
                 match runner_copy.run_once() {
                     Err(e) => {
                         panic!("Run runner failed, reason: {:?}", e);
-                    },
-                    Ok(len) => {
-                        (len == 0, Instant::now().duration_since(now))
-                    },
+                    }
+                    Ok(len) => (len == 0, Instant::now().duration_since(now)),
                 }
             },
-            move || {
-                rt_copy.wait_len() + rt_copy.len()
-            },
+            move || rt_copy.wait_len() + rt_copy.len(),
         );
 
         rt
     }
 
     /// 构建自定义的工作者异步运行时
-    pub fn custom_worker_thread<P, F0, F1>(pool: P,
-                                           worker_handle: Arc<AtomicBool>,
-                                           worker_condvar: Arc<(AtomicBool, Mutex<()>, Condvar)>,
-                                           thread_name: &str,
-                                           thread_stack_size: usize,
-                                           sleep_timeout: u64,
-                                           loop_interval: Option<u64>,
-                                           loop_func: F0,
-                                           get_queue_len: F1) -> WorkerRuntime<O, P>
-        where P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-              F0: Fn() -> (bool, Duration) + Send + 'static,
-              F1: Fn() -> usize + Send + 'static {
-        let runner = WorkerTaskRunner::new(pool,
-                                           worker_handle,
-                                           worker_condvar);
+    pub fn custom_worker_thread<P, F0, F1>(
+        pool: P,
+        worker_handle: Arc<AtomicBool>,
+        worker_condvar: Arc<(AtomicBool, Mutex<()>, Condvar)>,
+        thread_name: &str,
+        thread_stack_size: usize,
+        sleep_timeout: u64,
+        loop_interval: Option<u64>,
+        loop_func: F0,
+        get_queue_len: F1,
+    ) -> WorkerRuntime<O, P>
+    where
+        P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+        F0: Fn() -> (bool, Duration) + Send + 'static,
+        F1: Fn() -> usize + Send + 'static,
+    {
+        let runner = WorkerTaskRunner::new(pool, worker_handle, worker_condvar);
 
         //创建线程并在线程中执行异步运行时
         let rt_copy = runner.get_runtime();
@@ -573,19 +570,19 @@ impl<O: Default + 'static> AsyncRuntimeBuilder<O> {
             sleep_timeout,
             loop_interval,
             loop_func,
-            move || {
-                rt_copy.wait_len() + get_queue_len()
-            },
+            move || rt_copy.wait_len() + get_queue_len(),
         );
 
         rt
     }
 
     /// 构建默认的多线程异步运行时
-    pub fn default_multi_thread(worker_prefix: Option<&str>,
-                                worker_stack_size: Option<usize>,
-                                worker_size: Option<usize>,
-                                worker_sleep_timeout: Option<u64>) -> MultiTaskRuntime<O> {
+    pub fn default_multi_thread(
+        worker_prefix: Option<&str>,
+        worker_stack_size: Option<usize>,
+        worker_size: Option<usize>,
+        worker_sleep_timeout: Option<u64>,
+    ) -> MultiTaskRuntime<O> {
         let mut builder = MultiTaskRuntimeBuilder::default();
 
         if let Some(thread_prefix) = worker_prefix {
@@ -595,9 +592,7 @@ impl<O: Default + 'static> AsyncRuntimeBuilder<O> {
             builder = builder.thread_stack_size(thread_stack_size);
         }
         if let Some(size) = worker_size {
-            builder = builder
-                .init_worker_size(size)
-                .set_worker_limit(size, size);
+            builder = builder.init_worker_size(size).set_worker_limit(size, size);
         }
         if let Some(sleep_timeout) = worker_sleep_timeout {
             builder = builder.set_timeout(sleep_timeout);
@@ -607,13 +602,17 @@ impl<O: Default + 'static> AsyncRuntimeBuilder<O> {
     }
 
     /// 构建自定义的多线程异步运行时
-    pub fn custom_multi_thread<P>(pool: P,
-                                  worker_prefix: &str,
-                                  worker_stack_size: usize,
-                                  worker_size: usize,
-                                  worker_sleep_timeout: u64,
-                                  worker_timer_interval: usize) -> MultiTaskRuntime<O, P>
-        where P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P> {
+    pub fn custom_multi_thread<P>(
+        pool: P,
+        worker_prefix: &str,
+        worker_stack_size: usize,
+        worker_size: usize,
+        worker_sleep_timeout: u64,
+        worker_timer_interval: usize,
+    ) -> MultiTaskRuntime<O, P>
+    where
+        P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+    {
         MultiTaskRuntimeBuilder::new(pool)
             .thread_prefix(worker_prefix)
             .thread_stack_size(worker_stack_size)
@@ -633,7 +632,7 @@ pub fn bind_local_thread<O: Default + 'static>(runtime: LocalAsyncRuntime<O>) {
     }) {
         Err(e) => {
             panic!("Bind single runtime to local thread failed, reason: {:?}", e);
-        },
+        }
         Ok(_) => (),
     }
 }
@@ -649,11 +648,11 @@ pub fn unbind_local_thread() {
 /// 本地线程绑定的异步运行时
 ///
 pub struct LocalAsyncRuntime<O: Default + 'static> {
-    inner:              *const (),                                                  //内部运行时指针
-    get_id_func:        fn(*const ()) -> usize,                                     //获取本地运行时的id的函数
-    spawn_func:         fn(*const (), BoxFuture<'static, O>) -> Result<()>,         //派发函数
-    spawn_timing_func:  fn(*const (), BoxFuture<'static, O>, usize) -> Result<()>,  //定时派发函数
-    timeout_func:       fn(*const (), usize) -> BoxFuture<'static, ()>,             //超时函数
+    inner: *const (),                                               //内部运行时指针
+    get_id_func: fn(*const ()) -> usize,                            //获取本地运行时的id的函数
+    spawn_func: fn(*const (), BoxFuture<'static, O>) -> Result<()>, //派发函数
+    spawn_timing_func: fn(*const (), BoxFuture<'static, O>, usize) -> Result<()>, //定时派发函数
+    timeout_func: fn(*const (), usize) -> BoxFuture<'static, ()>,   //超时函数
 }
 
 unsafe impl<O: Default + 'static> Send for LocalAsyncRuntime<O> {}
@@ -661,18 +660,14 @@ unsafe impl<O: Default + 'static> Sync for LocalAsyncRuntime<O> {}
 
 impl<O: Default + 'static> LocalAsyncRuntime<O> {
     /// 创建本地线程绑定的异步运行时
-    pub fn new(inner: *const (),
-               get_id_func: fn(*const ()) -> usize,
-               spawn_func: fn(*const (), BoxFuture<'static, O>) -> Result<()>,
-               spawn_timing_func: fn(*const (), BoxFuture<'static, O>, usize) -> Result<()>,
-               timeout_func: fn(*const (), usize) -> BoxFuture<'static, ()>) -> Self {
-        LocalAsyncRuntime {
-            inner,
-            get_id_func,
-            spawn_func,
-            spawn_timing_func,
-            timeout_func,
-        }
+    pub fn new(
+        inner: *const (),
+        get_id_func: fn(*const ()) -> usize,
+        spawn_func: fn(*const (), BoxFuture<'static, O>) -> Result<()>,
+        spawn_timing_func: fn(*const (), BoxFuture<'static, O>, usize) -> Result<()>,
+        timeout_func: fn(*const (), usize) -> BoxFuture<'static, ()>,
+    ) -> Self {
+        LocalAsyncRuntime { inner, get_id_func, spawn_func, spawn_timing_func, timeout_func }
     }
 
     /// 获取本地运行时的id
@@ -684,21 +679,19 @@ impl<O: Default + 'static> LocalAsyncRuntime<O> {
     /// 派发一个指定的异步任务到本地线程绑定的异步运行时
     #[inline]
     pub fn spawn<F>(&self, future: F) -> Result<()>
-        where F: Future<Output = O> + Send + 'static {
-        (self.spawn_func)(self.inner, async move {
-            future.await
-        }.boxed())
+    where
+        F: Future<Output = O> + Send + 'static,
+    {
+        (self.spawn_func)(self.inner, async move { future.await }.boxed())
     }
 
     /// 定时派发一个指定的异步任务到本地线程绑定的异步运行时
     #[inline]
     pub fn sapwn_timing_func<F>(&self, future: F, timeout: usize) -> Result<()>
-        where F: Future<Output = O> + Send + 'static {
-        (self.spawn_timing_func)(self.inner,
-                                 async move {
-                                     future.await
-                                 }.boxed(),
-                                 timeout)
+    where
+        F: Future<Output = O> + Send + 'static,
+    {
+        (self.spawn_timing_func)(self.inner, async move { future.await }.boxed(), timeout)
     }
 
     /// 挂起本地线程绑定的异步运行时的当前任务，等待指定的时间后唤醒当前任务
@@ -738,12 +731,17 @@ pub fn local_async_runtime<O: Default + 'static>() -> Option<Arc<LocalAsyncRunti
 /// 注意：F::Output如果与本地线程绑定的运行时的O不相同，则无法执行指定任务
 ///
 pub fn spawn_local<O, F>(future: F) -> Result<()>
-    where O: Default + 'static,
-          F: Future<Output = O> + Send + 'static {
+where
+    O: Default + 'static,
+    F: Future<Output = O> + Send + 'static,
+{
     if let Some(rt) = local_async_runtime::<O>() {
         rt.spawn(future)
     } else {
-        Err(Error::new(ErrorKind::Other, format!("Spawn task to local thread failed, reason: runtime not exist")))
+        Err(Error::new(
+            ErrorKind::Other,
+            format!("Spawn task to local thread failed, reason: runtime not exist"),
+        ))
     }
 }
 
@@ -762,12 +760,8 @@ pub fn get_local_dict<T: 'static>() -> Option<&'static T> {
             }
         }
     }) {
-        Err(_) => {
-            None
-        },
-        Ok(result) => {
-            result
-        }
+        Err(_) => None,
+        Ok(result) => result,
     }
 }
 
@@ -786,12 +780,8 @@ pub fn get_local_dict_mut<T: 'static>() -> Option<&'static mut T> {
             }
         }
     }) {
-        Err(_) => {
-            None
-        },
-        Ok(result) => {
-            result
-        }
+        Err(_) => None,
+        Ok(result) => result,
     }
 }
 
@@ -820,12 +810,8 @@ pub fn set_local_dict<T: 'static>(value: T) -> Option<T> {
             result
         }
     }) {
-        Err(_) => {
-            None
-        },
-        Ok(result) => {
-            result
-        }
+        Err(_) => None,
+        Ok(result) => result,
     }
 }
 
@@ -849,12 +835,8 @@ pub fn remove_local_dict<T: 'static>() -> Option<T> {
             }
         }
     }) {
-        Err(_) => {
-            None
-        },
-        Ok(result) => {
-            result
-        }
+        Err(_) => None,
+        Ok(result) => result,
     }
 }
 
@@ -862,17 +844,13 @@ pub fn remove_local_dict<T: 'static>() -> Option<T> {
 /// 清空本地线程绑定的字典
 ///
 pub fn clear_local_dict() -> Result<()> {
-    match PI_ASYNC_LOCAL_THREAD_ASYNC_RUNTIME_DICT.try_with(move |dict| {
-        unsafe {
-            (&mut *dict.get()).clear();
-        }
+    match PI_ASYNC_LOCAL_THREAD_ASYNC_RUNTIME_DICT.try_with(move |dict| unsafe {
+        (&mut *dict.get()).clear();
     }) {
         Err(e) => {
             Err(Error::new(ErrorKind::Other, format!("Clear local dict failed, reason: {:?}", e)))
-        },
-        Ok(_) => {
-            Ok(())
         }
+        Ok(_) => Ok(()),
     }
 }
 
@@ -924,28 +902,22 @@ impl<V: Send + 'static> AsyncValue<V> {
 
     /// 判断异步值是否已完成设置
     pub fn is_complete(&self) -> bool {
-        self
-            .0
-            .status
-            .load(Ordering::Relaxed) == 2
+        self.0.status.load(Ordering::Relaxed) == 2
     }
 
     /// 设置异步值
     pub fn set(self, value: V) {
         let mut spin_len = 1;
         loop {
-            match self.0.status.compare_exchange(1,
-                                                 2,
-                                                 Ordering::Acquire,
-                                                 Ordering::Relaxed) {
+            match self.0.status.compare_exchange(1, 2, Ordering::Acquire, Ordering::Relaxed) {
                 Err(0) => {
                     //异步值的唤醒器已就绪，则自旋等待
                     spin_len = spin(spin_len);
-                },
+                }
                 Err(_) => {
                     //异步值已被设置，则立即返回
                     return;
-                },
+                }
                 Ok(_) => {
                     //已锁且获取到锁，则立即退出自旋
                     break;
@@ -954,7 +926,9 @@ impl<V: Send + 'static> AsyncValue<V> {
         }
 
         //已锁且获取到锁，则设置异步值，并立即唤醒异步值
-        unsafe { *self.0.value.get() = Some(value); }
+        unsafe {
+            *self.0.value.get() = Some(value);
+        }
         let waker = unsafe { (*self.0.waker.get()).take().unwrap() };
         waker.wake();
     }
@@ -962,9 +936,9 @@ impl<V: Send + 'static> AsyncValue<V> {
 
 // 同步阻塞的内部异步值，只允许被同步阻塞的设置一次值
 pub struct InnerAsyncValue<V: Send + 'static> {
-    value:  UnsafeCell<Option<V>>,      //值
-    waker:  UnsafeCell<Option<Waker>>,  //唤醒器
-    status: AtomicU8,                   //状态
+    value: UnsafeCell<Option<V>>,     //值
+    waker: UnsafeCell<Option<Waker>>, //唤醒器
+    status: AtomicU8,                 //状态
 }
 
 ///
@@ -1021,44 +995,38 @@ impl<V: Send + 'static> AsyncValueNonBlocking<V> {
 
     /// 判断异步值是否已完成设置
     pub fn is_complete(&self) -> bool {
-        self
-            .0
-            .status
-            .load(Ordering::Relaxed) == 3
+        self.0.status.load(Ordering::Relaxed) == 3
     }
 
     /// 设置异步值
     pub fn set(self, value: V) {
         loop {
-            match self.0.status.compare_exchange(1,
-                                                 2,
-                                                 Ordering::Acquire,
-                                                 Ordering::Relaxed) {
+            match self.0.status.compare_exchange(1, 2, Ordering::Acquire, Ordering::Relaxed) {
                 Err(0) => {
-                    match self.0.status.compare_exchange(0,
-                                                         2,
-                                                         Ordering::Acquire,
-                                                         Ordering::Relaxed) {
+                    match self.0.status.compare_exchange(0, 2, Ordering::Acquire, Ordering::Relaxed)
+                    {
                         Err(1) => {
                             //异步值的唤醒器已就绪，则继续尝试获取锁
                             continue;
-                        },
+                        }
                         Err(_) => {
                             //异步值正在设置或已完成设置，则立即返回
                             return;
-                        },
+                        }
                         Ok(_) => {
                             //异步值的唤醒器未就绪且获取到锁，则设置异步值后将状态设置为已完成设置，并立即返回
-                            unsafe { *self.0.value.get() = Some(value); }
+                            unsafe {
+                                *self.0.value.get() = Some(value);
+                            }
                             self.0.status.store(3, Ordering::Release);
                             return;
                         }
-                     }
-                },
+                    }
+                }
                 Err(_) => {
                     //异步值正在设置或已完成设置，则立即返回
                     return;
-                },
+                }
                 Ok(_) => {
                     //异步值的唤醒器已就绪且获取到锁，则立即退出自旋
                     break;
@@ -1067,7 +1035,9 @@ impl<V: Send + 'static> AsyncValueNonBlocking<V> {
         }
 
         //已锁且获取到锁，则设置异步值，将状态设置为已完成设置，并立即唤醒异步值
-        unsafe { *self.0.value.get() = Some(value); }
+        unsafe {
+            *self.0.value.get() = Some(value);
+        }
         self.0.status.store(3, Ordering::Release);
         let waker = unsafe { (*self.0.waker.get()).take().unwrap() };
         waker.wake();
@@ -1076,18 +1046,18 @@ impl<V: Send + 'static> AsyncValueNonBlocking<V> {
 
 // 同步非阻塞的内部异步值，只允许被同步非阻塞的设置一次值
 pub struct InnerAsyncValueNonBlocking<V: Send + 'static> {
-    value:  UnsafeCell<Option<V>>,      //值
-    waker:  UnsafeCell<Option<Waker>>,  //唤醒器
-    status: AtomicU8,                   //状态
+    value: UnsafeCell<Option<V>>,     //值
+    waker: UnsafeCell<Option<Waker>>, //唤醒器
+    status: AtomicU8,                 //状态
 }
 
 ///
 /// 异步可变值的守护者
 ///
 pub struct AsyncVariableGuard<'a, V: Send + 'static> {
-    value:  &'a UnsafeCell<Option<V>>,      //值
-    waker:  &'a UnsafeCell<Option<Waker>>,  //唤醒器
-    status: &'a AtomicU8,                   //值状态
+    value: &'a UnsafeCell<Option<V>>,     //值
+    waker: &'a UnsafeCell<Option<Waker>>, //唤醒器
+    status: &'a AtomicU8,                 //值状态
 }
 
 unsafe impl<V: Send + 'static> Send for AsyncVariableGuard<'_, V> {}
@@ -1103,17 +1073,13 @@ impl<V: Send + 'static> Deref for AsyncVariableGuard<'_, V> {
     type Target = Option<V>;
 
     fn deref(&self) -> &Self::Target {
-        unsafe {
-            &*self.value.get()
-        }
+        unsafe { &*self.value.get() }
     }
 }
 
 impl<V: Send + 'static> DerefMut for AsyncVariableGuard<'_, V> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            &mut *self.value.get()
-        }
+        unsafe { &mut *self.value.get() }
     }
 }
 
@@ -1174,31 +1140,22 @@ impl<V: Send + 'static> AsyncVariable<V> {
 
     /// 判断异步可变值是否已完成设置
     pub fn is_complete(&self) -> bool {
-        self
-            .0
-            .status
-            .load(Ordering::Acquire) & 4 != 0
+        self.0.status.load(Ordering::Acquire) & 4 != 0
     }
 
     /// 锁住待修改的异步可变值，并返回当前异步可变值的守护者，如果异步可变值已完成修改则返回空
     pub fn lock(&self) -> Option<AsyncVariableGuard<V>> {
         let mut spin_len = 1;
         loop {
-            match self
-                .0
-                .status
-                .compare_exchange(1,
-                                  3,
-                                  Ordering::Acquire,
-                                  Ordering::Relaxed) {
+            match self.0.status.compare_exchange(1, 3, Ordering::Acquire, Ordering::Relaxed) {
                 Err(0) => {
                     //异步可变值还未就绪，则自旋等待
                     spin_len = spin(spin_len);
-                },
+                }
                 Err(3) => {
                     //已锁但未获取到锁，则自旋等待
                     spin_len = spin(spin_len);
-                },
+                }
                 Err(_) => {
                     //已完成，则返回空
                     return None;
@@ -1211,8 +1168,8 @@ impl<V: Send + 'static> AsyncVariable<V> {
                         status: &self.0.status,
                     };
 
-                    return Some(guard)
-                },
+                    return Some(guard);
+                }
             }
         }
     }
@@ -1220,18 +1177,18 @@ impl<V: Send + 'static> AsyncVariable<V> {
 
 // 内部异步可变值，在完成前允许被修改多次
 pub struct InnerAsyncVariable<V: Send + 'static> {
-    value:  UnsafeCell<Option<V>>,      //值
-    waker:  UnsafeCell<Option<Waker>>,  //唤醒器
-    status: AtomicU8,                   //状态
+    value: UnsafeCell<Option<V>>,     //值
+    waker: UnsafeCell<Option<Waker>>, //唤醒器
+    status: AtomicU8,                 //状态
 }
 
 ///
 /// 异步非阻塞可变值的守护者
 ///
 pub struct AsyncVariableGuardNonBlocking<'a, V: Send + 'static> {
-    value:  &'a UnsafeCell<Option<V>>,      //值
-    waker:  &'a UnsafeCell<Option<Waker>>,  //唤醒器
-    status: &'a AtomicU8,                   //值状态
+    value: &'a UnsafeCell<Option<V>>,     //值
+    waker: &'a UnsafeCell<Option<Waker>>, //唤醒器
+    status: &'a AtomicU8,                 //值状态
 }
 
 unsafe impl<V: Send + 'static> Send for AsyncVariableGuardNonBlocking<'_, V> {}
@@ -1249,17 +1206,13 @@ impl<V: Send + 'static> Deref for AsyncVariableGuardNonBlocking<'_, V> {
     type Target = Option<V>;
 
     fn deref(&self) -> &Self::Target {
-        unsafe {
-            &*self.value.get()
-        }
+        unsafe { &*self.value.get() }
     }
 }
 
 impl<V: Send + 'static> DerefMut for AsyncVariableGuardNonBlocking<'_, V> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            &mut *self.value.get()
-        }
+        unsafe { &mut *self.value.get() }
     }
 }
 
@@ -1300,25 +1253,22 @@ impl<V: Send + 'static> Future for AsyncVariableNonBlocking<V> {
 
         let mut spin_len = 1;
         loop {
-            match self.0.status.compare_exchange(0,
-                                                 1,
-                                                 Ordering::Acquire,
-                                                 Ordering::Relaxed) {
+            match self.0.status.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed) {
                 Err(current) if current & 4 != 0 => {
                     //异步可变值已完成所有修改，则立即返回
                     unsafe {
                         let _ = (&mut *self.0.waker.get()).take(); //释放异步可变值的唤醒器
                         return Poll::Ready((&mut *(&self).0.value.get()).take().unwrap());
                     }
-                },
+                }
                 Err(_) => {
                     //还未完成值修改，则自旋等待
                     spin_len = spin(spin_len);
-                },
+                }
                 Ok(_) => {
                     //异步可变值已挂起
                     return Poll::Pending;
-                },
+                }
             }
         }
     }
@@ -1338,48 +1288,34 @@ impl<V: Send + 'static> AsyncVariableNonBlocking<V> {
 
     /// 判断异步可变值是否已完成设置
     pub fn is_complete(&self) -> bool {
-        self
-            .0
-            .status
-            .load(Ordering::Acquire) & 4 != 0
+        self.0.status.load(Ordering::Acquire) & 4 != 0
     }
 
     /// 锁住待修改的异步可变值，并返回当前异步可变值的守护者，如果异步可变值已完成修改则返回空
     pub fn lock(&self) -> Option<AsyncVariableGuardNonBlocking<V>> {
         let mut spin_len = 1;
         loop {
-            match self
-                .0
-                .status
-                .compare_exchange(1,
-                                  3,
-                                  Ordering::Acquire,
-                                  Ordering::Relaxed) {
+            match self.0.status.compare_exchange(1, 3, Ordering::Acquire, Ordering::Relaxed) {
                 Err(0) => {
                     //异步可变值还未就绪，则自旋等待
-                    match self
-                        .0
-                        .status
-                        .compare_exchange(0,
-                                          2,
-                                          Ordering::Acquire,
-                                          Ordering::Relaxed) {
+                    match self.0.status.compare_exchange(0, 2, Ordering::Acquire, Ordering::Relaxed)
+                    {
                         Err(1) => {
                             //异步可变值已就绪，则继续尝试获取锁
                             continue;
-                        },
+                        }
                         Err(2) => {
                             //异步可变值的唤醒器未就绪且已锁，但未获取到锁，则自旋等待
                             spin_len = spin(spin_len);
-                        },
+                        }
                         Err(3) => {
                             //异步可变值的唤醒器已就绪且已锁，但未获取到锁，则自旋等待
                             spin_len = spin(spin_len);
-                        },
+                        }
                         Err(_) => {
                             //已完成，则返回空
                             return None;
-                        },
+                        }
                         Ok(_) => {
                             //异步可变值的唤醒器未就绪且获取到锁，则返回异步可变值的守护者
                             let guard = AsyncVariableGuardNonBlocking {
@@ -1388,18 +1324,18 @@ impl<V: Send + 'static> AsyncVariableNonBlocking<V> {
                                 status: &self.0.status,
                             };
 
-                            return Some(guard)
-                        },
+                            return Some(guard);
+                        }
                     }
-                },
+                }
                 Err(2) => {
                     //异步可变值的唤醒器未就绪且已锁，但未获取到锁，则自旋等待
                     spin_len = spin(spin_len);
-                },
+                }
                 Err(3) => {
                     //异步可变值的唤醒器已就绪且已锁，但未获取到锁，则自旋等待
                     spin_len = spin(spin_len);
-                },
+                }
                 Err(_) => {
                     //已完成，则返回空
                     return None;
@@ -1412,8 +1348,8 @@ impl<V: Send + 'static> AsyncVariableNonBlocking<V> {
                         status: &self.0.status,
                     };
 
-                    return Some(guard)
-                },
+                    return Some(guard);
+                }
             }
         }
     }
@@ -1421,9 +1357,9 @@ impl<V: Send + 'static> AsyncVariableNonBlocking<V> {
 
 // 内部异步非阻塞可变值，在完成前允许被同步非阻塞的修改多次
 pub struct InnerAsyncVariableNonBlocking<V: Send + 'static> {
-    value:  UnsafeCell<Option<V>>,      //值
-    waker:  UnsafeCell<Option<Waker>>,  //唤醒器
-    status: AtomicU8,                   //状态
+    value: UnsafeCell<Option<V>>,     //值
+    waker: UnsafeCell<Option<Waker>>, //唤醒器
+    status: AtomicU8,                 //状态
 }
 
 ///
@@ -1457,40 +1393,31 @@ impl<V: Send + 'static> Clone for AsyncWaitResults<V> {
 ///
 /// 异步定时器任务
 ///
-pub enum AsyncTimingTask<
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static = (),
-> {
-    Pended(TaskId),                 //已挂起的定时任务
-    WaitRun(Arc<AsyncTask<P, O>>),  //等待执行的定时任务
+pub enum AsyncTimingTask<P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static = ()> {
+    Pended(TaskId),                //已挂起的定时任务
+    WaitRun(Arc<AsyncTask<P, O>>), //等待执行的定时任务
 }
 
 ///
 /// 异步任务本地定时器
 ///
-pub struct AsyncTaskTimer<
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static = (),
-> {
-    producor:   Sender<(usize, AsyncTimingTask<P, O>)>,                     //定时任务生产者
-    consumer:   Receiver<(usize, AsyncTimingTask<P, O>)>,                   //定时任务消费者
-    timer:      Arc<RefCell<Timer<AsyncTimingTask<P, O>, 1000, 60, 3>>>,    //定时器
-    now:        Instant,                                                    //当前时间
+pub struct AsyncTaskTimer<P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static = ()> {
+    producor: Sender<(usize, AsyncTimingTask<P, O>)>, //定时任务生产者
+    consumer: Receiver<(usize, AsyncTimingTask<P, O>)>, //定时任务消费者
+    timer: Arc<RefCell<Timer<AsyncTimingTask<P, O>, 1000, 60, 3>>>, //定时器
+    now: Instant,                                     //当前时间
 }
 
-unsafe impl<
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static,
-> Send for AsyncTaskTimer<P, O> {}
-unsafe impl<
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static,
-> Sync for AsyncTaskTimer<P, O> {}
+unsafe impl<P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static> Send
+    for AsyncTaskTimer<P, O>
+{
+}
+unsafe impl<P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static> Sync
+    for AsyncTaskTimer<P, O>
+{
+}
 
-impl<
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static,
-> AsyncTaskTimer<P, O> {
+impl<P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static> AsyncTaskTimer<P, O> {
     /// 构建异步任务本地定时器
     pub fn new() -> Self {
         let (producor, consumer) = unbounded();
@@ -1519,20 +1446,14 @@ impl<
 
     /// 设置定时器
     pub fn set_timer(&self, task: AsyncTimingTask<P, O>, timeout: usize) -> usize {
-        self
-            .timer
-            .borrow_mut()
-            .push(timeout, task)
-            .data()
-            .as_ffi() as usize
+        self.timer.borrow_mut().push(timeout, task).data().as_ffi() as usize
     }
 
     /// 取消定时器
     pub fn cancel_timer(&self, timer_ref: usize) -> Option<AsyncTimingTask<P, O>> {
-        if let Some(item) = self
-            .timer
-            .borrow_mut()
-            .cancel(KeyData::from_ffi(timer_ref as u64).into()) {
+        if let Some(item) =
+            self.timer.borrow_mut().cancel(KeyData::from_ffi(timer_ref as u64).into())
+        {
             Some(item)
         } else {
             None
@@ -1579,28 +1500,24 @@ pub struct AsyncWaitTimeout<
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
     O: Default + 'static = (),
 > {
-    rt:         RT,                                     //当前运行时
-    producor:   Sender<(usize, AsyncTimingTask<P, O>)>, //超时请求生产者
-    timeout:    usize,                                  //超时时长，单位ms
-    expired:    AtomicBool,                             //是否已过期
+    rt: RT,                                           //当前运行时
+    producor: Sender<(usize, AsyncTimingTask<P, O>)>, //超时请求生产者
+    timeout: usize,                                   //超时时长，单位ms
+    expired: AtomicBool,                              //是否已过期
 }
 
-unsafe impl<
-    RT: AsyncRuntime<O>,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static,
-> Send for AsyncWaitTimeout<RT, P, O> {}
-unsafe impl<
-    RT: AsyncRuntime<O>,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static,
-> Sync for AsyncWaitTimeout<RT, P, O> {}
+unsafe impl<RT: AsyncRuntime<O>, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static>
+    Send for AsyncWaitTimeout<RT, P, O>
+{
+}
+unsafe impl<RT: AsyncRuntime<O>, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static>
+    Sync for AsyncWaitTimeout<RT, P, O>
+{
+}
 
-impl<
-    RT: AsyncRuntime<O>,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static,
-> Future for AsyncWaitTimeout<RT, P, O> {
+impl<RT: AsyncRuntime<O>, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static> Future
+    for AsyncWaitTimeout<RT, P, O>
+{
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -1621,15 +1538,11 @@ impl<
     }
 }
 
-impl<
-    RT: AsyncRuntime<O>,
-    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
-    O: Default + 'static,
-> AsyncWaitTimeout<RT, P, O> {
+impl<RT: AsyncRuntime<O>, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>, O: Default + 'static>
+    AsyncWaitTimeout<RT, P, O>
+{
     /// 构建等待指定超时任务的方法
-    pub fn new(rt: RT,
-               producor: Sender<(usize, AsyncTimingTask<P, O>)>,
-               timeout: usize) -> Self {
+    pub fn new(rt: RT, producor: Sender<(usize, AsyncTimingTask<P, O>)>, timeout: usize) -> Self {
         AsyncWaitTimeout {
             rt,
             producor,
@@ -1652,13 +1565,12 @@ unsafe impl<V: Send + 'static> Sync for AsyncWait<V> {}
 */
 impl<V: Send + 'static> AsyncWait<V> {
     /// 派发指定超时时间的指定任务到指定的运行时，并返回派发是否成功
-    pub fn spawn<RT, O, F>(&self,
-                           rt: RT,
-                           timeout: Option<usize>,
-                           future: F) -> Result<()>
-        where RT: AsyncRuntime<O>,
-              O: Default + 'static,
-              F: Future<Output = Result<V>> + Send + 'static {
+    pub fn spawn<RT, O, F>(&self, rt: RT, timeout: Option<usize>, future: F) -> Result<()>
+    where
+        RT: AsyncRuntime<O>,
+        O: Default + 'static,
+        F: Future<Output = Result<V>> + Send + 'static,
+    {
         self.0.spawn(rt.clone(), future)?;
 
         if let Some(timeout) = timeout {
@@ -1677,11 +1589,11 @@ impl<V: Send + 'static> AsyncWait<V> {
     }
 
     /// 派发指定超时时间的指定任务到本地运行时，并返回派发是否成功
-    pub fn spawn_local<O, F>(&self,
-                             timeout: Option<usize>,
-                             future: F) -> Result<()>
-        where O: Default + 'static,
-              F: Future<Output = Result<V>> + Send + 'static {
+    pub fn spawn_local<O, F>(&self, timeout: Option<usize>, future: F) -> Result<()>
+    where
+        O: Default + 'static,
+        F: Future<Output = Result<V>> + Send + 'static,
+    {
         if let Some(rt) = local_async_runtime::<O>() {
             //当前线程有绑定运行时
             self.0.spawn_local(future)?;
@@ -1701,7 +1613,10 @@ impl<V: Send + 'static> AsyncWait<V> {
             }
         } else {
             //当前线程未绑定运行时
-            Err(Error::new(ErrorKind::Other, format!("Spawn wait task failed, reason: local async runtime not exist")))
+            Err(Error::new(
+                ErrorKind::Other,
+                format!("Spawn wait task failed, reason: local async runtime not exist"),
+            ))
         }
     }
 }
@@ -1720,9 +1635,9 @@ impl<V: Send + 'static> AsyncWait<V> {
 /// 等待任意异步任务执行完成
 ///
 pub struct AsyncWaitAny<V: Send + 'static> {
-    capacity:       usize,                      //派发任务的容量
-    producor:       AsyncSender<Result<V>>,     //异步返回值生成器
-    consumer:       AsyncReceiver<Result<V>>,   //异步返回值接收器
+    capacity: usize,                    //派发任务的容量
+    producor: AsyncSender<Result<V>>,   //异步返回值生成器
+    consumer: AsyncReceiver<Result<V>>, //异步返回值接收器
 }
 
 unsafe impl<V: Send + 'static> Send for AsyncWaitAny<V> {}
@@ -1733,12 +1648,12 @@ unsafe impl<V: Send + 'static> Sync for AsyncWaitAny<V> {}
 */
 impl<V: Send + 'static> AsyncWaitAny<V> {
     /// 派发指定任务到指定的运行时，并返回派发是否成功
-    pub fn spawn<RT, O, F>(&self,
-                           rt: RT,
-                           future: F) -> Result<()>
-        where RT: AsyncRuntime<O>,
-              O: Default + 'static,
-              F: Future<Output = Result<V>> + Send + 'static {
+    pub fn spawn<RT, O, F>(&self, rt: RT, future: F) -> Result<()>
+    where
+        RT: AsyncRuntime<O>,
+        O: Default + 'static,
+        F: Future<Output = Result<V>> + Send + 'static,
+    {
         let producor = self.producor.clone();
         rt.spawn(rt.alloc(), async move {
             let value = future.await;
@@ -1750,9 +1665,10 @@ impl<V: Send + 'static> AsyncWaitAny<V> {
     }
 
     /// 派发指定任务到本地运行时，并返回派发是否成功
-    pub fn spawn_local<F>(&self,
-                          future: F) -> Result<()>
-        where F: Future<Output = Result<V>> + Send + 'static {
+    pub fn spawn_local<F>(&self, future: F) -> Result<()>
+    where
+        F: Future<Output = Result<V>> + Send + 'static,
+    {
         if let Some(rt) = local_async_runtime() {
             //本地线程有绑定运行时
             let producor = self.producor.clone();
@@ -1762,7 +1678,10 @@ impl<V: Send + 'static> AsyncWaitAny<V> {
             })
         } else {
             //本地线程未绑定运行时
-            Err(Error::new(ErrorKind::Other, format!("Spawn wait any task failed, reason: local async runtime not exist")))
+            Err(Error::new(
+                ErrorKind::Other,
+                format!("Spawn wait any task failed, reason: local async runtime not exist"),
+            ))
         }
     }
 }
@@ -1776,12 +1695,15 @@ impl<V: Send + 'static> AsyncWaitAny<V> {
         match self.consumer.recv_async().await {
             Err(e) => {
                 //接收错误，则立即返回
-                Err(Error::new(ErrorKind::Other, format!("Wait any result failed, reason: {:?}", e)))
-            },
+                Err(Error::new(
+                    ErrorKind::Other,
+                    format!("Wait any result failed, reason: {:?}", e),
+                ))
+            }
             Ok(result) => {
                 //接收成功，则立即返回
                 result
-            },
+            }
         }
     }
 }
@@ -1790,9 +1712,9 @@ impl<V: Send + 'static> AsyncWaitAny<V> {
 /// 等待任意异步任务执行完成
 ///
 pub struct AsyncWaitAnyCallback<V: Send + 'static> {
-    capacity:   usize,                      //派发任务的容量
-    producor:   AsyncSender<Result<V>>,     //异步返回值生成器
-    consumer:   AsyncReceiver<Result<V>>,   //异步返回值接收器
+    capacity: usize,                    //派发任务的容量
+    producor: AsyncSender<Result<V>>,   //异步返回值生成器
+    consumer: AsyncReceiver<Result<V>>, //异步返回值接收器
 }
 
 unsafe impl<V: Send + 'static> Send for AsyncWaitAnyCallback<V> {}
@@ -1803,12 +1725,12 @@ unsafe impl<V: Send + 'static> Sync for AsyncWaitAnyCallback<V> {}
 */
 impl<V: Send + 'static> AsyncWaitAnyCallback<V> {
     /// 派发指定任务到指定的运行时，并返回派发是否成功
-    pub fn spawn<RT, O, F>(&self,
-                           rt: RT,
-                           future: F) -> Result<()>
-        where RT: AsyncRuntime<O>,
-              O: Default + 'static,
-              F: Future<Output = Result<V>> + Send + 'static {
+    pub fn spawn<RT, O, F>(&self, rt: RT, future: F) -> Result<()>
+    where
+        RT: AsyncRuntime<O>,
+        O: Default + 'static,
+        F: Future<Output = Result<V>> + Send + 'static,
+    {
         let producor = self.producor.clone();
         rt.spawn(rt.alloc(), async move {
             let value = future.await;
@@ -1820,9 +1742,10 @@ impl<V: Send + 'static> AsyncWaitAnyCallback<V> {
     }
 
     /// 派发指定任务到本地运行时，并返回派发是否成功
-    pub fn spawn_local<F>(&self,
-                          future: F) -> Result<()>
-        where F: Future<Output = Result<V>> + Send + 'static {
+    pub fn spawn_local<F>(&self, future: F) -> Result<()>
+    where
+        F: Future<Output = Result<V>> + Send + 'static,
+    {
         if let Some(rt) = local_async_runtime() {
             //当前线程有绑定运行时
             let producor = self.producor.clone();
@@ -1842,32 +1765,41 @@ impl<V: Send + 'static> AsyncWaitAnyCallback<V> {
 */
 impl<V: Send + 'static> AsyncWaitAnyCallback<V> {
     /// 异步等待满足用户回调需求的已派发任务的结果
-    pub async fn wait_result(mut self,
-                             callback: impl Fn(&Result<V>) -> bool + Send + Sync + 'static) -> Result<V> {
+    pub async fn wait_result(
+        mut self,
+        callback: impl Fn(&Result<V>) -> bool + Send + Sync + 'static,
+    ) -> Result<V> {
         let checker = create_checker(self.capacity, callback);
         loop {
             match self.consumer.recv_async().await {
                 Err(e) => {
                     //接收错误，则立即返回
-                    return Err(Error::new(ErrorKind::Other, format!("Wait any result failed by callback, reason: {:?}", e)));
-                },
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        format!("Wait any result failed by callback, reason: {:?}", e),
+                    ));
+                }
                 Ok(result) => {
                     //接收成功，则检查是否立即返回
                     if checker(&result) {
                         //检查通过，则立即唤醒等待的任务，否则等待其它任务唤醒
                         return result;
                     }
-                },
+                }
             }
         }
     }
 }
 
 // 根据用户提供的回调，生成检查器
-fn create_checker<V, F>(len: usize,
-                        callback: F) -> Arc<dyn Fn(&Result<V>) -> bool + Send + Sync + 'static>
-    where V: Send + 'static,
-          F: Fn(&Result<V>) -> bool + Send + Sync + 'static {
+fn create_checker<V, F>(
+    len: usize,
+    callback: F,
+) -> Arc<dyn Fn(&Result<V>) -> bool + Send + Sync + 'static>
+where
+    V: Send + 'static,
+    F: Fn(&Result<V>) -> bool + Send + Sync + 'static,
+{
     let mut check_counter = AtomicUsize::new(len); //初始化检查计数器
     Arc::new(move |result| {
         if check_counter.fetch_sub(1, Ordering::SeqCst) == 1 {
@@ -1884,10 +1816,10 @@ fn create_checker<V, F>(len: usize,
 /// 异步映射归并
 ///
 pub struct AsyncMapReduce<V: Send + 'static> {
-    count:          usize,                              //派发的任务数量
-    capacity:       usize,                              //派发任务的容量
-    producor:       AsyncSender<(usize, Result<V>)>,    //异步返回值生成器
-    consumer:       AsyncReceiver<(usize, Result<V>)>,  //异步返回值接收器
+    count: usize,                                //派发的任务数量
+    capacity: usize,                             //派发任务的容量
+    producor: AsyncSender<(usize, Result<V>)>,   //异步返回值生成器
+    consumer: AsyncReceiver<(usize, Result<V>)>, //异步返回值接收器
 }
 
 unsafe impl<V: Send + 'static> Send for AsyncMapReduce<V> {}
@@ -1898,12 +1830,20 @@ unsafe impl<V: Send + 'static> Send for AsyncMapReduce<V> {}
 impl<V: Send + 'static> AsyncMapReduce<V> {
     /// 映射指定任务到指定的运行时，并返回任务序号
     pub fn map<RT, O, F>(&mut self, rt: RT, future: F) -> Result<usize>
-        where RT: AsyncRuntime<O>,
-              O: Default + 'static,
-              F: Future<Output = Result<V>> + Send + 'static {
+    where
+        RT: AsyncRuntime<O>,
+        O: Default + 'static,
+        F: Future<Output = Result<V>> + Send + 'static,
+    {
         if self.count >= self.capacity {
             //已派发任务已达可派发任务的限制，则返回错误
-            return Err(Error::new(ErrorKind::Other, format!("Map task to runtime failed, capacity: {}, reason: out of capacity", self.capacity)));
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!(
+                    "Map task to runtime failed, capacity: {}, reason: out of capacity",
+                    self.capacity
+                ),
+            ));
         }
 
         let index = self.count;
@@ -1933,25 +1873,25 @@ impl<V: Send + 'static> AsyncMapReduce<V> {
             match self.consumer.recv_async().await {
                 Err(e) => {
                     //接收错误，则立即返回
-                    return Err(Error::new(ErrorKind::Other, format!("Reduce result failed, reason: {:?}", e)));
-                },
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        format!("Reduce result failed, reason: {:?}", e),
+                    ));
+                }
                 Ok((index, result)) => {
                     //接收成功，则继续
                     results.push((index, result));
                     count -= 1;
-                },
+                }
             }
         }
 
         if order {
             //需要对结果集进行排序
-            results.sort_by_key(|(key, _value)| {
-                key.clone()
-            });
+            results.sort_by_key(|(key, _value)| key.clone());
         }
-        let (_, values) = results
-            .into_iter()
-            .unzip::<usize, Result<V>, Vec<usize>, Vec<Result<V>>>();
+        let (_, values) =
+            results.into_iter().unzip::<usize, Result<V>, Vec<usize>, Vec<Result<V>>>();
 
         Ok(values)
     }
@@ -1961,8 +1901,8 @@ impl<V: Send + 'static> AsyncMapReduce<V> {
 /// 异步管道过滤器结果
 ///
 pub enum AsyncPipelineResult<O: 'static> {
-    Disconnect,     //关闭管道
-    Filtered(O),    //过滤后的值
+    Disconnect,  //关闭管道
+    Filtered(O), //过滤后的值
 }
 
 ///
@@ -1970,83 +1910,94 @@ pub enum AsyncPipelineResult<O: 'static> {
 /// 返回线程的句柄，可以通过句柄关闭线程
 /// 线程在没有任务可以执行时会休眠，当派发任务或唤醒任务时会自动唤醒线程
 ///
-pub fn spawn_worker_thread<F0, F1>(thread_name: &str,
-                                   thread_stack_size: usize,
-                                   thread_handler: Arc<AtomicBool>,
-                                   thread_waker: Arc<(AtomicBool, Mutex<()>, Condvar)>, //用于唤醒运行时所在线程的条件变量
-                                   sleep_timeout: u64,                                  //休眠超时时长，单位毫秒
-                                   loop_interval: Option<u64>,                          //工作者线程循环的间隔时长，None为无间隔，单位毫秒
-                                   loop_func: F0,
-                                   get_queue_len: F1) -> Arc<AtomicBool>
-    where F0: Fn() -> (bool, Duration) + Send + 'static,
-          F1: Fn() -> usize + Send + 'static {
+pub fn spawn_worker_thread<F0, F1>(
+    thread_name: &str,
+    thread_stack_size: usize,
+    thread_handler: Arc<AtomicBool>,
+    thread_waker: Arc<(AtomicBool, Mutex<()>, Condvar)>, //用于唤醒运行时所在线程的条件变量
+    sleep_timeout: u64,                                  //休眠超时时长，单位毫秒
+    loop_interval: Option<u64>, //工作者线程循环的间隔时长，None为无间隔，单位毫秒
+    loop_func: F0,
+    get_queue_len: F1,
+) -> Arc<AtomicBool>
+where
+    F0: Fn() -> (bool, Duration) + Send + 'static,
+    F1: Fn() -> usize + Send + 'static,
+{
     let thread_status_copy = thread_handler.clone();
 
-    thread::Builder::new()
-        .name(thread_name.to_string())
-        .stack_size(thread_stack_size).spawn(move || {
-        let mut sleep_count = 0;
+    thread::Builder::new().name(thread_name.to_string()).stack_size(thread_stack_size).spawn(
+        move || {
+            let mut sleep_count = 0;
 
-        while thread_handler.load(Ordering::Relaxed) {
-            let (is_no_task, run_time) = loop_func();
+            while thread_handler.load(Ordering::Relaxed) {
+                let (is_no_task, run_time) = loop_func();
 
-            if is_no_task {
-                //当前没有任务
-                if sleep_count > 1 {
-                    //当前没有任务连续达到2次，则休眠线程
-                    sleep_count = 0; //重置休眠计数
-                    let (is_sleep, lock, condvar) = &*thread_waker;
-                    let mut locked = lock.lock();
-                    if get_queue_len() > 0 {
-                        //当前有任务，则继续工作
-                        continue;
+                if is_no_task {
+                    //当前没有任务
+                    if sleep_count > 1 {
+                        //当前没有任务连续达到2次，则休眠线程
+                        sleep_count = 0; //重置休眠计数
+                        let (is_sleep, lock, condvar) = &*thread_waker;
+                        let mut locked = lock.lock();
+                        if get_queue_len() > 0 {
+                            //当前有任务，则继续工作
+                            continue;
+                        }
+
+                        if !is_sleep.load(Ordering::Relaxed) {
+                            //如果当前未休眠，则休眠
+                            is_sleep.store(true, Ordering::SeqCst);
+                            if condvar
+                                .wait_for(&mut locked, Duration::from_millis(sleep_timeout))
+                                .timed_out()
+                            {
+                                //条件超时唤醒，则设置状态为未休眠
+                                is_sleep.store(false, Ordering::SeqCst);
+                            }
+                        }
+
+                        continue; //唤醒后立即尝试执行任务
                     }
 
-                    if !is_sleep.load(Ordering::Relaxed) {
-                        //如果当前未休眠，则休眠
-                        is_sleep.store(true, Ordering::SeqCst);
-                        if condvar
-                            .wait_for(
-                                &mut locked,
-                                Duration::from_millis(sleep_timeout),
-                            )
-                            .timed_out()
+                    sleep_count += 1; //休眠计数
+                    if let Some(interval) = &loop_interval {
+                        //设置了循环间隔时长
+                        if let Some(remaining_interval) =
+                            Duration::from_millis(*interval).checked_sub(run_time)
                         {
-                            //条件超时唤醒，则设置状态为未休眠
-                            is_sleep.store(false, Ordering::SeqCst);
+                            //本次运行少于循环间隔，则休眠剩余的循环间隔，并继续执行任务
+                            thread::sleep(remaining_interval);
                         }
                     }
-
-                    continue; //唤醒后立即尝试执行任务
-                }
-
-                sleep_count += 1; //休眠计数
-                if let Some(interval) = &loop_interval {
-                    //设置了循环间隔时长
-                    if let Some(remaining_interval) = Duration::from_millis(*interval).checked_sub(run_time){
-                        //本次运行少于循环间隔，则休眠剩余的循环间隔，并继续执行任务
-                        thread::sleep(remaining_interval);
-                    }
-                }
-            } else {
-                //当前有任务
-                sleep_count = 0; //重置休眠计数
-                if let Some(interval) = &loop_interval {
-                    //设置了循环间隔时长
-                    if let Some(remaining_interval) = Duration::from_millis(*interval).checked_sub(run_time){
-                        //本次运行少于循环间隔，则休眠剩余的循环间隔，并继续执行任务
-                        thread::sleep(remaining_interval);
+                } else {
+                    //当前有任务
+                    sleep_count = 0; //重置休眠计数
+                    if let Some(interval) = &loop_interval {
+                        //设置了循环间隔时长
+                        if let Some(remaining_interval) =
+                            Duration::from_millis(*interval).checked_sub(run_time)
+                        {
+                            //本次运行少于循环间隔，则休眠剩余的循环间隔，并继续执行任务
+                            thread::sleep(remaining_interval);
+                        }
                     }
                 }
             }
-        }
-    });
+        },
+    );
 
     thread_status_copy
 }
 
 /// 唤醒工作者所在线程，如果线程当前正在运行，则忽略
-pub fn wakeup_worker_thread<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>(worker_waker: &Arc<(AtomicBool, Mutex<()>, Condvar)>, rt: &SingleTaskRuntime<O, P>) {
+pub fn wakeup_worker_thread<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+>(
+    worker_waker: &Arc<(AtomicBool, Mutex<()>, Condvar)>,
+    rt: &SingleTaskRuntime<O, P>,
+) {
     //检查工作者所在线程是否需要唤醒
     if worker_waker.0.load(Ordering::Relaxed) && rt.len() > 0 {
         let (is_sleep, lock, condvar) = &**worker_waker;
@@ -2058,7 +2009,12 @@ pub fn wakeup_worker_thread<O: Default + 'static, P: AsyncTaskPoolExt<O> + Async
 
 /// 注册全局异常处理器，会替换当前全局异常处理器
 pub fn register_global_panic_handler<Handler>(handler: Handler)
-    where Handler: Fn(thread::Thread, String, Option<String>, Option<(String, u32, u32)>) -> Option<i32> + Send + Sync + 'static {
+where
+    Handler: Fn(thread::Thread, String, Option<String>, Option<(String, u32, u32)>) -> Option<i32>
+        + Send
+        + Sync
+        + 'static,
+{
     set_hook(Box::new(move |panic_info| {
         let thread_info = thread::current();
 
@@ -2070,15 +2026,11 @@ pub fn register_global_panic_handler<Handler>(handler: Handler)
                     None => {
                         //不是&'static str，则返回未知异常
                         "Unknow panic".to_string()
-                    },
-                    Some(info) => {
-                        info.clone()
                     }
+                    Some(info) => info.clone(),
                 }
-            },
-            Some(info) => {
-                info.to_string()
             }
+            Some(info) => info.to_string(),
         };
 
         let other_info = if let Some(arg) = panic_info.message() {
@@ -2111,18 +2063,20 @@ pub fn replace_global_alloc_error_handler() {
 
 fn global_alloc_error_handle(layout: Layout) {
     let bt = Backtrace::new();
-    eprintln!("[UTC: {}][Thread: {}]Global memory allocation of {:?} bytes failed, stacktrace: \n{:?}",
-              SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis(),
-              thread::current().name().unwrap_or(""),
-              layout.size(),
-              bt);
+    eprintln!(
+        "[UTC: {}][Thread: {}]Global memory allocation of {:?} bytes failed, stacktrace: \n{:?}",
+        SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis(),
+        thread::current().name().unwrap_or(""),
+        layout.size(),
+        bt
+    );
 }
 
 ///单调递增时间
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MontonicTime {
-    Normal(std::time::Instant),    //标准单调递增时间
-    Fast((i64, i64)),   //快速单调递增时间，只支持类Linux系统
+    Normal(std::time::Instant), //标准单调递增时间
+    Fast((i64, i64)),           //快速单调递增时间，只支持类Linux系统
 }
 
 unsafe impl Send for MontonicTime {}
@@ -2167,10 +2121,7 @@ impl MontonicTime {
 #[inline]
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn now_monotonic() -> (i64, i64) {
-    let mut time = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
+    let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
 
     let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_COARSE, &mut time) };
     assert!(ret == 0);
