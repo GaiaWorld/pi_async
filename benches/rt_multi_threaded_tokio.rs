@@ -2,40 +2,204 @@
 
 extern crate test;
 
-use tokio::runtime::{self, Runtime};
-use tokio::sync::oneshot;
+use test::Bencher;
 
+use std::thread;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{mpsc, Arc};
-use test::Bencher;
+
+use crossbeam_channel::{Sender, bounded};
+
+use tokio::runtime::{self, Runtime};
+use tokio::sync::oneshot;
+
+#[derive(Clone)]
+struct AtomicCounter(Sender<()>);
+impl Drop for AtomicCounter {
+    fn drop(&mut self) {
+        self.0.send(()); //通知执行完成
+    }
+}
+
+#[bench]
+fn spawn_empty_many(b: &mut Bencher) {
+    let rt = Arc::new(rt());
+    let (send, recv) = bounded(1);
+
+    b.iter(move || {
+        let rt0 = rt.clone();
+        let rt1 = rt.clone();
+        let rt2 = rt.clone();
+        let rt3 = rt.clone();
+
+        {
+            let counter = Arc::new(AtomicCounter(send.clone()));
+            let counter0 = counter.clone();
+            let counter1 = counter.clone();
+            let counter2 = counter.clone();
+            let counter3 = counter.clone();
+
+            thread::spawn(move || {
+                for _ in 0..2500 {
+                    let counter_copy = counter0.clone();
+                    let _ = rt0.spawn(async move {
+                        counter_copy;
+                    });
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 2500..5000 {
+                    let counter_copy = counter1.clone();
+                    let _ = rt1.spawn(async move {
+                        counter_copy;
+                    });
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 5000..7500 {
+                    let counter_copy = counter2.clone();
+                    let _ = rt2.spawn(async move {
+                        counter_copy;
+                    });
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 7500..10000 {
+                    let counter_copy = counter3.clone();
+                    let _ = rt3.spawn(async move {
+                        counter_copy;
+                    });
+                }
+            });
+        }
+
+        let _ = recv.clone().recv().unwrap();
+    });
+}
+
+#[bench]
+fn await_empty_many(b: &mut Bencher) {
+    let rt = Arc::new(rt());
+    let (send, recv) = bounded(1);
+
+    b.iter(move || {
+        let rt0 = rt.clone();
+        let rt1 = rt.clone();
+        let rt2 = rt.clone();
+        let rt3 = rt.clone();
+
+        {
+            let counter = Arc::new(AtomicCounter(send.clone()));
+            let counter0 = counter.clone();
+            let counter1 = counter.clone();
+            let counter2 = counter.clone();
+            let counter3 = counter.clone();
+
+            rt0.spawn(async move {
+                for _ in 0..2500 {
+                    let counter_copy = counter0.clone();
+                    async move {
+                        counter_copy;
+                    }.await;
+                }
+            });
+
+            rt1.spawn(async move {
+                for _ in 2500..5000 {
+                    let counter_copy = counter1.clone();
+                    async move {
+                        counter_copy;
+                    }.await;
+                }
+            });
+
+            rt2.spawn(async move {
+                for _ in 5000..7500 {
+                    let counter_copy = counter2.clone();
+                    async move {
+                        counter_copy;
+                    }.await;
+                }
+            });
+
+            rt3.spawn(async move {
+                for _ in 7500..10000 {
+                    let counter_copy = counter3.clone();
+                    async move {
+                        counter_copy;
+                    }.await;
+                }
+            });
+        }
+
+        let _ = recv.clone().recv().unwrap();
+    });
+}
 
 #[bench]
 fn spawn_many(b: &mut Bencher) {
-    const NUM_SPAWN: usize = 10_000;
+    let rt = Arc::new(rt());
+    let (send, recv) = bounded(1);
 
-    let rt = rt();
+    b.iter(move || {
+        let rt0 = rt.clone();
+        let rt1 = rt.clone();
+        let rt2 = rt.clone();
+        let rt3 = rt.clone();
 
-    let (tx, rx) = mpsc::sync_channel(1000);
-    let rem = Arc::new(AtomicUsize::new(0));
+        {
+            let counter = Arc::new(AtomicCounter(send.clone()));
+            let counter0 = counter.clone();
+            let counter1 = counter.clone();
+            let counter2 = counter.clone();
+            let counter3 = counter.clone();
 
-    b.iter(|| {
-        rem.store(NUM_SPAWN, Relaxed);
+            let rt0_copy = rt0.clone();
+            rt0.spawn(async move {
+                for _ in 0..2500 {
+                    let counter_copy = counter0.clone();
+                    let _ = rt0_copy.spawn(async move {
+                        counter_copy;
+                    });
+                }
+            });
 
-        rt.block_on(async {
-            for _ in 0..NUM_SPAWN {
-                let tx = tx.clone();
-                let rem = rem.clone();
+            let rt1_copy = rt1.clone();
+            rt1.spawn(async move {
+                for _ in 2500..5000 {
+                    let counter_copy = counter1.clone();
+                    let _ = rt1_copy.spawn(async move {
+                        counter_copy;
+                    });
+                }
+            });
 
-                tokio::spawn(async move {
-                    if 1 == rem.fetch_sub(1, Relaxed) {
-                        tx.send(()).unwrap();
-                    }
-                });
-            }
+            let rt2_copy = rt2.clone();
+            rt2.spawn(async move {
+                for _ in 5000..7500 {
+                    let counter_copy = counter2.clone();
+                    let _ = rt2_copy.spawn(async move {
+                        counter_copy;
+                    });
+                }
+            });
 
-            let _ = rx.recv().unwrap();
-        });
+            let rt3_copy = rt3.clone();
+            rt3.spawn(async move {
+                for _ in 7500..10000 {
+                    let counter_copy = counter3.clone();
+                    let _ = rt3_copy.spawn(async move {
+                        counter_copy;
+                    });
+                }
+            });
+        }
+
+        let _ = recv.clone().recv().unwrap();
     });
 }
 
@@ -73,15 +237,14 @@ fn ping_pong(b: &mut Bencher) {
 
     let rt = rt();
 
-    let (done_tx, done_rx) = mpsc::sync_channel(1000);
     let rem = Arc::new(AtomicUsize::new(0));
 
     b.iter(|| {
-        let done_tx = done_tx.clone();
+        let (done_tx, done_rx) = bounded(1);
         let rem = rem.clone();
         rem.store(NUM_PINGS, Relaxed);
 
-        rt.block_on(async {
+        rt.spawn(async move {
             tokio::spawn(async move {
                 for _ in 0..NUM_PINGS {
                     let rem = rem.clone();
@@ -105,9 +268,8 @@ fn ping_pong(b: &mut Bencher) {
                     });
                 }
             });
-
-            done_rx.recv().unwrap();
         });
+        let _ = done_rx.recv().unwrap();
     });
 }
 
@@ -139,6 +301,73 @@ fn chained_spawn(b: &mut Bencher) {
 
             done_rx.recv().unwrap();
         });
+    });
+}
+
+#[bench]
+fn spawn_one_to_one(b: &mut Bencher) {
+    let rt = Arc::new(rt());
+    let (send, recv) = bounded(1);
+
+    b.iter(move || {
+        let rt0 = rt.clone();
+        let rt1 = rt.clone();
+        let rt2 = rt.clone();
+        let rt3 = rt.clone();
+
+        {
+            let counter = Arc::new(AtomicCounter(send.clone()));
+            let counter0 = counter.clone();
+            let counter1 = counter.clone();
+            let counter2 = counter.clone();
+            let counter3 = counter.clone();
+
+            thread::spawn(move || {
+                for _ in 0..2500 {
+                    let counter_copy = counter0.clone();
+                    let _ = rt0.spawn(async move {
+                        let _ = tokio::spawn(async move {
+                            counter_copy;
+                        });
+                    });
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 2500..5000 {
+                    let counter_copy = counter1.clone();
+                    let _ = rt1.spawn(async move {
+                        let _ = tokio::spawn(async move {
+                            counter_copy;
+                        });
+                    });
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 5000..7500 {
+                    let counter_copy = counter2.clone();
+                    let _ = rt2.spawn(async move {
+                        let _ = tokio::spawn(async move {
+                            counter_copy;
+                        });
+                    });
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 7500..10000 {
+                    let counter_copy = counter3.clone();
+                    let _ = rt3.spawn(async move {
+                        let _ = tokio::spawn(async move {
+                            counter_copy;
+                        });
+                    });
+                }
+            });
+        }
+
+        let _ = recv.clone().recv().unwrap();
     });
 }
 

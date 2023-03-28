@@ -23,6 +23,7 @@ use crate::rt::{TaskId, AsyncPipelineResult,
                          AsyncMapReduce,
                          LocalAsyncRuntime,
                          spawn_worker_thread, wakeup_worker_thread},
+                YieldNow,
                 serial_single_thread::{SingleTaskPool, SingleTaskRunner, SingleTaskRuntime}};
 
 ///
@@ -87,44 +88,154 @@ impl<
 
     /// 分配异步任务的唯一id
     #[inline]
-    fn alloc(&self) -> TaskId {
-        (self.0).2.alloc()
+    fn alloc<R: 'static>(&self) -> TaskId {
+        (self.0).2.alloc::<R>()
     }
 
     /// 派发一个指定的异步任务到异步运行时
-    fn spawn<F>(&self, task_id: TaskId, future: F) -> Result<()>
+    fn spawn<F>(&self, future: F) -> Result<TaskId>
         where F: Future<Output = O> + 'static {
         if !(self.0).0.load(Ordering::SeqCst) {
             return Err(Error::new(ErrorKind::Other, "Spawn async task failed, reason: worker already closed"));
         }
 
-        let result = (self.0).2.spawn(task_id, future);
+        let result = (self.0).2.spawn(future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个异步任务到本地异步运行时，如果本地没有本异步运行时，则会派发到当前运行时中
+    fn spawn_local<F>(&self, future: F) -> Result<TaskId>
+        where
+            F: Future<Output = O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn local async task failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_local(future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定优先级的异步任务到异步运行时
+    fn spawn_priority<F>(&self, priority: usize, future: F) -> Result<TaskId>
+        where
+            F: Future<Output = O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn priority async task failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_priority(priority, future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个异步任务到异步运行时，并立即让出任务的当前运行
+    fn spawn_yield<F>(&self, future: F) -> Result<TaskId>
+        where
+            F: Future<Output = O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn yield priority async task failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_yield(future);
         wakeup_worker_thread(&(self.0).1, &(self.0).2);
         result
     }
 
     /// 派发一个在指定时间后执行的异步任务到异步运行时，时间单位ms
-    fn spawn_timing<F>(&self, task_id: TaskId, future: F, time: usize) -> Result<()>
+    fn spawn_timing<F>(&self, future: F, time: usize) -> Result<TaskId>
         where F: Future<Output = O> + 'static {
         if !(self.0).0.load(Ordering::SeqCst) {
             return Err(Error::new(ErrorKind::Other, "Spawn timing async task failed, reason: worker already closed"));
         }
 
-        let result = (self.0).2.spawn_timing(task_id, future, time);
+        let result = (self.0).2.spawn_timing(future, time);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定任务唯一id的异步任务到异步运行时
+    fn spawn_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where
+            F: Future<Output=O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn async task by id failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_by_id(task_id, future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定任务唯一id的异步任务到本地异步运行时，如果本地没有本异步运行时，则会派发到当前运行时中
+    fn spawn_local_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where
+            F: Future<Output=O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn local async task by id failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_local_by_id(task_id, future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定任务唯一id和任务优先级的异步任务到异步运行时
+    fn spawn_priority_by_id<F>(&self,
+                               task_id: TaskId,
+                               priority: usize,
+                               future: F) -> Result<()>
+        where
+            F: Future<Output=O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn priority async task by id failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_priority_by_id(task_id, priority, future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定任务唯一id的异步任务到异步运行时，并立即让出任务的当前运行
+    fn spawn_yield_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where
+            F: Future<Output=O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn yield async task by id failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_yield_by_id(task_id, future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定任务唯一id和在指定时间后执行的异步任务到异步运行时，时间单位ms
+    fn spawn_timing_by_id<F>(&self,
+                             task_id: TaskId,
+                             future: F,
+                             time: usize) -> Result<()>
+        where
+            F: Future<Output=O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn timing async task by id failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_timing_by_id(task_id, future, time);
         wakeup_worker_thread(&(self.0).1, &(self.0).2);
         result
     }
 
     /// 挂起指定唯一id的异步任务
     #[inline]
-    fn pending<Output>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output> {
-        (self.0).2.pending(task_id, waker)
+    fn pending<Output: 'static>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output> {
+        (self.0).2.pending::<Output>(task_id, waker)
     }
 
     /// 唤醒指定唯一id的异步任务
     #[inline]
-    fn wakeup(&self, task_id: &TaskId) {
-        (self.0).2.wakeup(task_id);
+    fn wakeup<Output: 'static>(&self, task_id: &TaskId) {
+        (self.0).2.wakeup::<Output>(task_id);
     }
 
     /// 挂起当前异步运行时的当前任务，并在指定的其它运行时上派发一个指定的异步任务，等待其它运行时上的异步任务完成后，唤醒当前运行时的当前任务，并返回其它运行时上的异步任务的值
@@ -155,6 +266,12 @@ impl<
     #[inline]
     fn timeout(&self, timeout: usize) -> LocalBoxFuture<'static, ()> {
         (self.0).2.timeout(timeout)
+    }
+
+    /// 立即让出当前任务的执行
+    #[inline]
+    fn yield_now(&self) -> LocalBoxFuture<'static, ()> {
+        (self.0).2.yield_now()
     }
 
     /// 生成一个异步管道，输入指定流，输入流的每个值通过过滤器生成输出流的值
@@ -289,7 +406,7 @@ impl<
     pub(crate) fn spawn_raw(raw: *const (),
                             future: LocalBoxFuture<'static, O>) -> Result<()> {
         let rt = WorkerRuntime::<O, P>::from_raw(raw);
-        let result = rt.spawn(rt.alloc(), future);
+        let result = rt.spawn_by_id(rt.alloc::<O>(), future);
         Arc::into_raw(rt.0); //避免提前释放
         result
     }
@@ -299,7 +416,7 @@ impl<
                                    future: LocalBoxFuture<'static, O>,
                                    timeout: usize) -> Result<()> {
         let rt = WorkerRuntime::<O, P>::from_raw(raw);
-        let result = rt.spawn_timing(rt.alloc(), future, timeout);
+        let result = rt.spawn_timing_by_id(rt.alloc::<O>(), future, timeout);
         Arc::into_raw(rt.0); //避免提前释放
         result
     }

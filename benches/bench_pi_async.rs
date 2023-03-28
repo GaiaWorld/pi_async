@@ -1,37 +1,53 @@
 #![feature(test)]
 extern crate test;
 
+use std::thread;
 use std::sync::Arc;
 use std::time::Duration;
 use test::Bencher;
 
-use pi_async::lock::mutex_lock::Mutex;
-use pi_async::rt::multi_thread::{MultiTaskRuntime, MultiTaskRuntimeBuilder};
-use pi_async::rt::AsyncRuntime;
-
 use crossbeam_channel::bounded;
+use async_lock::Mutex;
+
+use pi_async::rt::{startup_global_time_loop, AsyncRuntime,
+                   multi_thread::{StealableTaskPool, MultiTaskRuntime, MultiTaskRuntimeBuilder}};
 
 #[bench]
 fn bench_async_mutex(b: &mut Bencher) {
-    let pool0 = MultiTaskRuntimeBuilder::default();
-    let rt0: MultiTaskRuntime<()> = pool0.build();
+    let _handle = startup_global_time_loop(100);
 
-    let pool1 = MultiTaskRuntimeBuilder::default();
-    let rt1: MultiTaskRuntime<()> = pool1.build();
+    thread::sleep(Duration::from_millis(10000));
 
+    let pool = StealableTaskPool::with(2,
+                                       100000,
+                                       [1, 254],
+                                       3000);
+    let rt0 = MultiTaskRuntimeBuilder::new(pool)
+        .thread_stack_size(2 * 1024 * 1024)
+        .init_worker_size(2)
+        .set_worker_limit(2, 2)
+        .build();
+
+    let pool = StealableTaskPool::with(2,
+                                       100000,
+                                       [1, 254],
+                                       3000);
+    let rt1 = MultiTaskRuntimeBuilder::new(pool)
+        .thread_stack_size(2 * 1024 * 1024)
+        .init_worker_size(2)
+        .set_worker_limit(2, 2)
+        .build();
+
+    let rt0_copy = rt0.clone();
+    let rt1_copy = rt1.clone();
+    let (s, r) = bounded(1);
+    let shared = Arc::new(Mutex::new(0));
     b.iter(|| {
-        let rt0_copy = rt0.clone();
-        let rt1_copy = rt1.clone();
-
-        let (s, r) = bounded(1);
-
-        let shared = Arc::new(Mutex::new(0));
-
         for _ in 0..1 {
             let s0_copy = s.clone();
             let shared0_copy = shared.clone();
             rt0_copy
-                .spawn(rt0_copy.alloc(), async move {
+                .spawn(async move {
                     for _ in 0..500 {
                         let mut v = shared0_copy.lock().await;
                         if *v >= 999 {
@@ -49,7 +65,7 @@ fn bench_async_mutex(b: &mut Bencher) {
             let s1_copy = s.clone();
             let shared1_copy = shared.clone();
             rt1_copy
-                .spawn(rt1_copy.alloc(), async move {
+                .spawn(async move {
                     for _ in 0..500 {
                         let mut v = shared1_copy.lock().await;
                         if *v >= 999 {

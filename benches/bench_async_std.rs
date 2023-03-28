@@ -21,7 +21,7 @@ fn bench_async_mutex(b: &mut Bencher) {
             let shared0_copy = shared.clone();
             task::spawn(async move {
                 for _ in 0..500 {
-                    let mut v = shared0_copy.lock().await;
+                    let mut v = shared0_copy.lock_arc().await;
                     if *v >= 999 {
                         *v += 1;
                         s0_copy.send(()).unwrap();
@@ -37,7 +37,7 @@ fn bench_async_mutex(b: &mut Bencher) {
             let shared1_copy = shared.clone();
             task::spawn(async move {
                 for _ in 0..500 {
-                    let mut v = shared1_copy.lock().await;
+                    let mut v = shared1_copy.lock_arc().await;
                     if *v >= 999 {
                         *v += 1;
                         s1_copy.send(()).unwrap();

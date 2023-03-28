@@ -1,3 +1,4 @@
+use std::ptr::null_mut;
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -9,6 +10,7 @@ use std::sync::{
     Arc,
 };
 use std::task::{Context, Poll};
+use std::task::Poll::Pending;
 use std::thread;
 
 use async_stream::stream;
@@ -22,11 +24,10 @@ use futures::{
 };
 
 use crate::{
-    lock::spin,
     rt::{
         alloc_rt_uid,
         serial::{AsyncMapReduce, AsyncWait, AsyncWaitAny, AsyncWaitAnyCallback},
-        AsyncPipelineResult,
+        AsyncPipelineResult, YieldNow
     },
 };
 
@@ -41,7 +42,7 @@ unsafe impl<O: Default + 'static> Sync for LocalTask<O> {}
 
 impl<O: Default + 'static> ArcWake for LocalTask<O> {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        arc_self.runtime.will_wakeup_once(arc_self.clone());
+        arc_self.runtime.will_wakeup(arc_self.clone());
     }
 }
 
@@ -64,9 +65,10 @@ impl<O: Default + 'static> LocalTask<O> {
 ///
 pub struct LocalTaskRuntime<O: Default + 'static = ()>(
     Arc<(
-        usize,                       //运行时唯一id
-        Arc<AtomicBool>,             //运行状态
-        SegQueue<Arc<LocalTask<O>>>, //本地异步任务池
+        usize,                                      //运行时唯一id
+        Arc<AtomicBool>,                            //运行状态
+        SegQueue<Arc<LocalTask<O>>>,                //外部任务队列
+        UnsafeCell<VecDeque<Arc<LocalTask<O>>>>,    //内部任务队列
     )>,
 );
 
@@ -93,7 +95,17 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
 
     /// 获取当前异步运行时任务数量
     pub fn len(&self) -> usize {
-        unsafe { (self.0).2.len() }
+        unsafe {
+            (self.0).2.len() + (&*(self.0).3.get()).len()
+        }
+    }
+
+    /// 获取当前内部任务的数量
+    #[inline]
+    pub(crate) fn internal_len(&self) -> usize {
+        unsafe {
+            (&*(self.0).3.get()).len()
+        }
     }
 
     /// 派发一个指定的异步任务到异步运行时
@@ -101,10 +113,20 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
     where
         F: Future<Output = O> + 'static,
     {
-        self.will_wakeup_once(Arc::new(LocalTask {
-            inner: UnsafeCell::new(Some(future.boxed_local())),
-            runtime: self.clone(),
-        }));
+        unsafe {
+            (&mut *(self.0).3.get()).push_back(Arc::new(LocalTask {
+                inner: UnsafeCell::new(Some(future.boxed_local())),
+                runtime: self.clone(),
+            }));
+        }
+    }
+
+    /// 将要唤醒指定的任务
+    #[inline]
+    pub(crate) fn will_wakeup(&self, task: Arc<LocalTask<O>>) {
+        unsafe {
+            (&mut *(self.0).3.get()).push_back(task);
+        }
     }
 
     /// 线程安全的发送一个异步任务到异步运行时
@@ -112,20 +134,19 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
     where
         F: Future<Output = O> + 'static,
     {
-        self.will_wakeup_once(Arc::new(LocalTask {
+        (self.0).2.push(Arc::new(LocalTask {
             inner: UnsafeCell::new(Some(future.boxed_local())),
             runtime: self.clone(),
         }));
     }
 
-    /// 线程安全的唤醒一个将被唤醒的本地异步任务
+    /// 将外部任务队列中的任务移动到内部任务队列
     #[inline]
-    pub fn wakeup_once(&self) {}
-
-    /// 线程安全的将一个挂起的本地异步任务设置为将被唤醒的本地异步任务
-    #[inline]
-    fn will_wakeup_once(&self, task: Arc<LocalTask<O>>) {
-        (self.0).2.push(task);
+    pub fn poll(&self) {
+        let internal = unsafe { &mut * (self.0).3.get() };
+        while let Some(task) = (self.0).2.pop() {
+            internal.push_back(task);
+        }
     }
 
     /// 挂起当前异步运行时的当前任务，并在指定的其它运行时上派发一个指定的异步任务，等待其它运行时上的异步任务完成后，唤醒当前运行时的当前任务，并返回其它运行时上的异步任务的值
@@ -154,6 +175,13 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
         AsyncMapReduce::new(0, capacity, producor, consumer)
     }
 
+    /// 立即让出当前任务的执行
+    fn yield_now(&self) -> LocalBoxFuture<'static, ()> {
+        async move {
+            YieldNow(false).await;
+        }.boxed_local()
+    }
+
     /// 生成一个异步管道，输入指定流，输入流的每个值通过过滤器生成输出流的值
     pub fn pipeline<S, SO, F, FO>(&self, input: S, mut filter: F) -> LocalBoxStream<'static, FO>
     where
@@ -179,60 +207,36 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
         output.boxed_local()
     }
 
+    /// 阻塞当前线程，并在当前线程内执行指定的异步任务，返回指定异步任务执行后的结果
     pub fn block_on<F>(&self, future: F) -> IOResult<F::Output>
-    where
-        F: Future + 'static,
-        <F as Future>::Output: Default + 'static,
+        where
+            F: Future + 'static,
+            <F as Future>::Output: Default + 'static,
     {
-        let (sender, receiver) = bounded(1);
+        let runner = LocalTaskRunner(self.clone());
+        let mut result: Option<<F as Future>::Output> = None;
+        let result_ptr = (&mut result) as *mut Option<<F as Future>::Output>;
+
         self.spawn(async move {
             //在指定运行时中执行，并返回结果
             let r = future.await;
-            sender.send(r);
+            unsafe {
+                *result_ptr = Some(r);
+            }
 
             Default::default()
         });
-        self.wakeup_once();
 
-        let mut count = 0;
-        let mut spin_len = 1;
         loop {
-            count += 1;
-            if count > 3 {
-                //当前异步任务执行时间过长，则自旋后继续等待
-                spin_len = spin(spin_len);
-            }
-
-            //在本地线程中推动当前运行时执行
-            unsafe {
-                let option = (self.0).2.pop();
-                if let Some(task) = option {
-                    let waker = waker_ref(&task);
-                    let mut context = Context::from_waker(&*waker);
-                    if let Some(mut future) = task.get_inner() {
-                        if let Poll::Pending = future.as_mut().poll(&mut context) {
-                            //当前未准备好，则恢复本地异步任务，以保证本地异步任务不被提前释放
-                            task.set_inner(Some(future));
-                        }
-                    }
-                }
+            //执行异步任务
+            while self.internal_len() > 0 {
+                runner.run_once();
             }
 
             //尝试获取异步任务的执行结果
-            match receiver.try_recv() {
-                Err(e) => {
-                    if e.is_disconnected() {
-                        //通道已关闭，则立即返回错误原因
-                        return Err(Error::new(
-                            ErrorKind::Other,
-                            format!("Block on failed, reason: {:?}", e),
-                        ));
-                    }
-                }
-                Ok(result) => {
-                    //异步任务已完成，则立即返回执行结果
-                    return Ok(result);
-                }
+            if let Some(result) = result.take() {
+                //异步任务已完成，则立即返回执行结果
+                return Ok(result);
             }
         }
     }
@@ -280,6 +284,7 @@ impl<O: Default + 'static> LocalTaskRunner<O> {
             alloc_rt_uid(),
             Arc::new(AtomicBool::new(false)),
             SegQueue::new(),
+            UnsafeCell::new(VecDeque::new()),
         );
 
         LocalTaskRunner(LocalTaskRuntime(Arc::new(inner)))
@@ -301,7 +306,7 @@ impl<O: Default + 'static> LocalTaskRunner<O> {
                 (rt_copy.0).1.store(true, Ordering::Relaxed);
 
                 while rt_copy.is_running() {
-                    rt_copy.wakeup_once();
+                    rt_copy.poll();
                     self.run_once();
                 }
             });
@@ -313,12 +318,11 @@ impl<O: Default + 'static> LocalTaskRunner<O> {
     #[inline]
     pub fn run_once(&self) {
         unsafe {
-            let option = (&(self.0).0).2.pop();
-            if let Some(task) = option {
+            if let Some(task) = (&mut *(&(self.0).0).3.get()).pop_front() {
                 let waker = waker_ref(&task);
                 let mut context = Context::from_waker(&*waker);
                 if let Some(mut future) = task.get_inner() {
-                    if let Poll::Pending = future.as_mut().poll(&mut context) {
+                    if let Pending = future.as_mut().poll(&mut context) {
                         //当前未准备好，则恢复本地异步任务，以保证本地异步任务不被提前释放
                         task.set_inner(Some(future));
                     }

@@ -1,8 +1,3 @@
-pub use crate::lock::spin_lock::*;
-pub use crate::lock::mutex_lock::*;
-pub use crate::lock::rw_lock::*;
-pub use crate::rt::async_pipeline::*;
-
 #[cfg(not(feature = "serial"))]
 pub use crate::rt::*;
 #[cfg(not(feature = "serial"))]

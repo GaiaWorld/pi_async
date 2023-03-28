@@ -1,6 +1,7 @@
 //! 单线程运行时
 //!
 
+use std::thread;
 use std::any::Any;
 use std::cell::RefCell;
 use std::cell::UnsafeCell;
@@ -11,9 +12,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 use std::vec::IntoIter;
+use std::collections::vec_deque::VecDeque;
+use std::process::Output;
 
 use async_stream::stream;
 use crossbeam_channel::{bounded, unbounded, Sender};
+use crossbeam_queue::SegQueue;
 use flume::bounded as async_bounded;
 use futures::{
     future::{FutureExt, LocalBoxFuture},
@@ -21,21 +25,21 @@ use futures::{
     task::{waker_ref, ArcWake},
 };
 use parking_lot::{Condvar, Mutex};
+use quanta::Clock;
+
+use wrr::IWRRSelector;
 
 use crate::{
-    lock::{
-        mpsc_deque::{mpsc_deque, Receiver as MpscRecv, Sender as MpscSent},
-        spin,
-    },
+    lock::spin,
     rt::{
-        alloc_rt_uid,
+        PI_ASYNC_THREAD_LOCAL_ID, DEFAULT_MAX_HIGH_PRIORITY_BOUNDED, DEFAULT_HIGH_PRIORITY_BOUNDED, DEFAULT_MAX_LOW_PRIORITY_BOUNDED, alloc_rt_uid,
         serial::{
             bind_local_thread, local_async_runtime, AsyncMapReduce, AsyncRuntime, AsyncRuntimeExt,
             AsyncTask, AsyncTaskPool, AsyncTaskPoolExt, AsyncTaskTimer, AsyncTimingTask, AsyncWait,
             AsyncWaitAny, AsyncWaitAnyCallback, AsyncWaitResult, AsyncWaitTimeout,
             LocalAsyncRuntime,
         },
-        AsyncPipelineResult, TaskId,
+        AsyncPipelineResult, TaskId, TaskHandle, YieldNow
     },
 };
 
@@ -43,49 +47,22 @@ use crate::{
 /// 单线程任务池
 ///
 pub struct SingleTaskPool<O: Default + 'static> {
-    id: usize,                                                              //绑定的线程唯一id
-    consumer: Arc<RefCell<MpscRecv<Arc<AsyncTask<SingleTaskPool<O>, O>>>>>, //任务消费者
-    producer: Arc<MpscSent<Arc<AsyncTask<SingleTaskPool<O>, O>>>>,          //任务生产者
-    consume_count: Arc<AtomicUsize>,                                        //任务消费计数
-    produce_count: Arc<AtomicUsize>,                                        //任务生产计数
-    thread_waker: Option<Arc<(AtomicBool, Mutex<()>, Condvar)>>,            //绑定线程的唤醒器
+    id:             usize,                                                      //绑定的线程唯一id
+    public:         SegQueue<Arc<AsyncTask<SingleTaskPool<O>, O>>>,             //外部任务队列
+    internal:       UnsafeCell<VecDeque<Arc<AsyncTask<SingleTaskPool<O>, O>>>>, //内部任务队列
+    stack:          UnsafeCell<Vec<Arc<AsyncTask<SingleTaskPool<O>, O>>>>,      //本地任务栈
+    selector:       UnsafeCell<IWRRSelector<2>>,                                //任务池选择器
+    consume_count:  AtomicUsize,                                                //任务消费计数
+    produce_count:  AtomicUsize,                                                //任务生产计数
+    thread_waker:   Option<Arc<(AtomicBool, Mutex<()>, Condvar)>>,              //绑定线程的唤醒器
 }
 
 unsafe impl<O: Default + 'static> Send for SingleTaskPool<O> {}
 unsafe impl<O: Default + 'static> Sync for SingleTaskPool<O> {}
 
-impl<O: Default + 'static> Clone for SingleTaskPool<O> {
-    fn clone(&self) -> Self {
-        SingleTaskPool {
-            id: self.id,
-            consumer: self.consumer.clone(),
-            producer: self.producer.clone(),
-            consume_count: self.consume_count.clone(),
-            produce_count: self.produce_count.clone(),
-            thread_waker: self.thread_waker.clone(),
-        }
-    }
-}
-
 impl<O: Default + 'static> Default for SingleTaskPool<O> {
     fn default() -> Self {
-        let rt_uid = alloc_rt_uid();
-        let (producer, consumer) = mpsc_deque();
-        let consume_count = Arc::new(AtomicUsize::new(0));
-        let produce_count = Arc::new(AtomicUsize::new(0));
-
-        SingleTaskPool {
-            id: (rt_uid << 8) & 0xffff | 1,
-            consumer: Arc::new(RefCell::new(consumer)),
-            producer: Arc::new(producer),
-            consume_count,
-            produce_count,
-            thread_waker: Some(Arc::new((
-                AtomicBool::new(false),
-                Mutex::new(()),
-                Condvar::new(),
-            ))),
-        }
+        SingleTaskPool::new([1, 1])
     }
 }
 
@@ -94,7 +71,29 @@ impl<O: Default + 'static> AsyncTaskPool<O> for SingleTaskPool<O> {
 
     #[inline]
     fn get_thread_id(&self) -> usize {
-        self.id
+        let rt_uid = self.id;
+        match PI_ASYNC_THREAD_LOCAL_ID.try_with(move |thread_id| {
+            let current = unsafe { *thread_id.get() };
+            if current == usize::MAX {
+                //当前还未初始化当前运行时的线程id，则初始化
+                unsafe {
+                    *thread_id.get() = rt_uid << 32;
+                    *thread_id.get()
+                }
+            } else {
+                current
+            }
+        }) {
+            Err(e) => {
+                //不应该执行到这个分支
+                panic!(
+                    "Get thread id failed, thread: {:?}, reason: {:?}",
+                    thread::current(),
+                    e
+                );
+            }
+            Ok(id) => id,
+        }
     }
 
     #[inline]
@@ -112,36 +111,113 @@ impl<O: Default + 'static> AsyncTaskPool<O> for SingleTaskPool<O> {
 
     #[inline]
     fn push(&self, task: Arc<AsyncTask<Self::Pool, O>>) -> Result<()> {
-        self.producer.send(task);
+        self.public.push(task);
         self.produce_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
     #[inline]
-    fn push_timed_out(&self, _index: u64, task: Arc<AsyncTask<Self::Pool, O>>) -> Result<()> {
-        self.consumer.as_ref().borrow_mut().push_front(task);
-        self.produce_count.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+    fn push_local(&self, task: Arc<AsyncTask<Self::Pool, O>>) -> Result<()> {
+        let id = self.get_thread_id();
+        let rt_uid = task.owner();
+        if (id >> 32) == rt_uid {
+            //当前是运行时所在线程
+            unsafe {{
+                (&mut *self.internal.get()).push_back(task);
+            }}
+            self.produce_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        } else {
+            //当前不是运行时所在线程
+            self.push(task)
+        }
+    }
+
+    #[inline]
+    fn push_priority(&self,
+                     priority: usize,
+                     task: Arc<AsyncTask<Self::Pool, O>>) -> Result<()> {
+        if priority >= DEFAULT_MAX_HIGH_PRIORITY_BOUNDED {
+            //最高优先级
+            let id = self.get_thread_id();
+            let rt_uid = task.owner();
+            if (id >> 32) == rt_uid {
+                //当前是运行时所在线程
+                unsafe {
+                    let stack = (&mut *self.stack.get());
+                    if stack
+                        .capacity()
+                        .checked_sub(stack.len())
+                        .unwrap_or(0) >= 0 {
+                        //本地任务栈有空闲容量，则立即将任务加入本地任务栈
+                        (&mut *self.stack.get()).push(task);
+                    } else {
+                        //本地内部任务队列有空闲容量，则立即将任务加入本地内部任务队列
+                        (&mut *self.internal.get()).push_back(task);
+                    }
+                }
+
+                self.produce_count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            } else {
+                //当前不是运行时所在线程
+                self.push(task)
+            }
+        } else if priority >= DEFAULT_HIGH_PRIORITY_BOUNDED {
+            //高优先级
+            self.push_local(task)
+        } else {
+            //低优先级
+            self.push(task)
+        }
     }
 
     #[inline]
     fn push_keep(&self, task: Arc<AsyncTask<Self::Pool, O>>) -> Result<()> {
-        self.push(task)
+        self.push_priority(DEFAULT_HIGH_PRIORITY_BOUNDED, task)
     }
 
     #[inline]
     fn try_pop(&self) -> Option<Arc<AsyncTask<Self::Pool, O>>> {
-        let task = self.consumer.as_ref().borrow_mut().try_recv();
+        let task = unsafe { (&mut *self
+            .stack
+            .get())
+            .pop()
+        };
         if task.is_some() {
+            //指定工作者的任务栈有任务，则立即返回任务
             self.consume_count.fetch_add(1, Ordering::Relaxed);
+            return task;
+        }
+
+        //从指定工作者的任务队列中弹出任务
+        let task = try_pop_by_weight(self);
+        if task.is_some() {
+            self
+                .consume_count
+                .fetch_add(1, Ordering::Relaxed);
         }
         task
     }
 
     #[inline]
     fn try_pop_all(&self) -> IntoIter<Arc<AsyncTask<Self::Pool, O>>> {
-        let all = self.consumer.as_ref().borrow_mut().try_recv_all();
-        self.consume_count.fetch_add(all.len(), Ordering::Relaxed);
+        let mut all = Vec::with_capacity(self.len());
+
+        let internal = unsafe { (&mut *self.internal.get()) };
+        for _ in 0..internal.len() {
+            if let Some(task) = internal.pop_front() {
+                all.push(task);
+            }
+        }
+
+        let public_len = self.public.len();
+        for _ in 0..public_len {
+            if let Some(task) = self.public.pop() {
+                all.push(task);
+            }
+        }
+
         all.into_iter()
     }
 
@@ -151,9 +227,81 @@ impl<O: Default + 'static> AsyncTaskPool<O> for SingleTaskPool<O> {
     }
 }
 
+// 尝试通过统计信息更新权重，根据权重选择从本地外部任务队列或本地内部任务队列中弹出任务
+fn try_pop_by_weight<O: Default + 'static>(pool: &SingleTaskPool<O>)
+    -> Option<Arc<AsyncTask<SingleTaskPool<O>, O>>> {
+    unsafe {
+        //根据权重选择从指定的任务队列弹出任务
+        match (&mut *pool.selector.get()).select() {
+            0 => {
+                //弹出外部任务
+                let task = try_pop_external(pool);
+                if task.is_some() {
+                    task
+                } else {
+                    //当前没有外部任务，则尝试弹出内部任务
+                    try_pop_internal(pool)
+                }
+            },
+            _ => {
+                //弹出内部任务
+                let task = try_pop_internal(pool);
+                if task.is_some() {
+                    task
+                } else {
+                    //当前没有内部任务，则尝试弹出外部任务
+                    try_pop_external(pool)
+                }
+            },
+        }
+    }
+}
+
+// 尝试弹出内部任务队列的任务
+#[inline]
+fn try_pop_internal<O: Default + 'static>(pool: &SingleTaskPool<O>)
+    -> Option<Arc<AsyncTask<SingleTaskPool<O>, O>>> {
+    unsafe { (&mut *pool.internal.get()).pop_front() }
+}
+
+// 尝试弹出外部任务队列的任务
+#[inline]
+fn try_pop_external<O: Default + 'static>(pool: &SingleTaskPool<O>)
+    -> Option<Arc<AsyncTask<SingleTaskPool<O>, O>>> {
+    pool.public.pop()
+}
+
 impl<O: Default + 'static> AsyncTaskPoolExt<O> for SingleTaskPool<O> {
     fn set_thread_waker(&mut self, thread_waker: Arc<(AtomicBool, Mutex<()>, Condvar)>) {
         self.thread_waker = Some(thread_waker);
+    }
+}
+
+impl<O: Default + 'static> SingleTaskPool<O> {
+    /// 构建指定权重的单线程任务池
+    pub fn new(weights: [u8; 2]) -> Self {
+        let rt_uid = alloc_rt_uid();
+        let public = SegQueue::new();
+        let internal = UnsafeCell::new(VecDeque::new());
+        let stack = UnsafeCell::new(Vec::with_capacity(1));
+        let selector = UnsafeCell::new(IWRRSelector::new(weights));
+        let consume_count = AtomicUsize::new(0);
+        let produce_count = AtomicUsize::new(0);
+
+        SingleTaskPool {
+            id: (rt_uid << 8) & 0xffff | 1,
+            public,
+            internal,
+            stack,
+            selector,
+            consume_count,
+            produce_count,
+            thread_waker: Some(Arc::new((
+                AtomicBool::new(false),
+                Mutex::new(()),
+                Condvar::new(),
+            ))),
+        }
     }
 }
 
@@ -168,7 +316,9 @@ pub struct SingleTaskRuntime<
         usize,                                  //运行时唯一id
         Arc<P>,                                 //异步任务池
         Sender<(usize, AsyncTimingTask<P, O>)>, //休眠的异步任务生产者
-        Mutex<AsyncTaskTimer<P, O>>,            //本地定时器
+        AsyncTaskTimer<P, O>,                   //本地定时器
+        AtomicUsize,                            //定时器任务生产计数
+        AtomicUsize,                            //定时器任务消费计数
     )>,
 );
 
@@ -206,7 +356,11 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
 
     /// 获取当前异步运行时待处理任务数量
     fn wait_len(&self) -> usize {
-        (self.0).3.lock().len()
+        (self.0)
+            .4
+            .load(Ordering::Relaxed)
+            .checked_sub((self.0).5.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     /// 获取当前异步运行时任务数量
@@ -215,18 +369,78 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
     }
 
     /// 分配异步任务的唯一id
-    fn alloc(&self) -> TaskId {
-        TaskId(Arc::new(AtomicUsize::new(0)))
+    fn alloc<R: 'static>(&self) -> TaskId {
+        TaskId(UnsafeCell::new((TaskHandle::<R>::default().into_raw() as u128) << 64 | self.get_id() as u128 & 0xffffffffffffffff))
     }
 
     /// 派发一个指定的异步任务到异步运行时
-    fn spawn<F>(&self, task_id: TaskId, future: F) -> Result<()>
-    where
-        F: Future<Output = O> + 'static,
-    {
+    fn spawn<F>(&self, future: F) -> Result<TaskId>
+        where
+            F: Future<Output = O> + 'static {
+        let task_id = self.alloc::<F::Output>();
+        if let Err(e) = self.spawn_by_id(task_id.clone(), future) {
+            return Err(e);
+        }
+
+        Ok(task_id)
+    }
+
+    /// 派发一个异步任务到本地异步运行时，如果本地没有本异步运行时，则会派发到当前运行时中
+    fn spawn_local<F>(&self, future: F) -> Result<TaskId>
+        where
+            F: Future<Output = O> + 'static {
+        let task_id = self.alloc::<F::Output>();
+        if let Err(e) = self.spawn_local_by_id(task_id.clone(), future) {
+            return Err(e);
+        }
+
+        Ok(task_id)
+    }
+
+    /// 派发一个指定优先级的异步任务到异步运行时
+    fn spawn_priority<F>(&self, priority: usize, future: F) -> Result<TaskId>
+        where
+            F: Future<Output = O> + 'static {
+        let task_id = self.alloc::<F::Output>();
+        if let Err(e) = self.spawn_priority_by_id(task_id.clone(), priority, future) {
+            return Err(e);
+        }
+
+        Ok(task_id)
+    }
+
+    /// 派发一个异步任务到异步运行时，并立即让出任务的当前运行
+    fn spawn_yield<F>(&self, future: F) -> Result<TaskId>
+        where
+            F: Future<Output = O> + 'static {
+        let task_id = self.alloc::<F::Output>();
+        if let Err(e) = self.spawn_yield_by_id(task_id.clone(), future) {
+            return Err(e);
+        }
+
+        Ok(task_id)
+    }
+
+    /// 派发一个在指定时间后执行的异步任务到异步运行时，时间单位ms
+    fn spawn_timing<F>(&self, future: F, time: usize) -> Result<TaskId>
+        where
+            F: Future<Output = O> + 'static {
+        let task_id = self.alloc::<F::Output>();
+        if let Err(e) = self.spawn_timing_by_id(task_id.clone(), future, time) {
+            return Err(e);
+        }
+
+        Ok(task_id)
+    }
+
+    /// 派发一个指定任务唯一id的异步任务到异步运行时
+    fn spawn_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where
+            F: Future<Output = O> + 'static {
         if let Err(e) = (self.0).1.push(Arc::new(AsyncTask::new(
             task_id,
             (self.0).1.clone(),
+            DEFAULT_MAX_LOW_PRIORITY_BOUNDED,
             Some(future.boxed_local()),
         ))) {
             return Err(Error::new(ErrorKind::Other, e));
@@ -235,40 +449,74 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
         Ok(())
     }
 
-    /// 派发一个在指定时间后执行的异步任务到异步运行时，时间单位ms
-    fn spawn_timing<F>(&self, task_id: TaskId, future: F, time: usize) -> Result<()>
-    where
-        F: Future<Output = O> + 'static,
-    {
-        (self.0).3.lock().set_timer(
-            AsyncTimingTask::WaitRun(Arc::new(AsyncTask::new(
-                task_id.clone(),
-                (self.0).1.clone(),
-                Some(future.boxed_local()),
-            ))),
-            time,
-        );
+    /// 派发一个指定任务唯一id的异步任务到本地异步运行时，如果本地没有本异步运行时，则会派发到当前运行时中
+    fn spawn_local_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where
+            F: Future<Output = O> + 'static {
+        (self.0).1.push_local(Arc::new(AsyncTask::new(
+            task_id,
+            (self.0).1.clone(),
+            DEFAULT_HIGH_PRIORITY_BOUNDED,
+            Some(future.boxed_local()))))
+    }
 
-        Ok(())
+    /// 派发一个指定任务唯一id和任务优先级的异步任务到异步运行时
+    fn spawn_priority_by_id<F>(&self,
+                               task_id: TaskId,
+                               priority: usize,
+                               future: F) -> Result<()>
+        where
+            F: Future<Output = O> + 'static {
+        (self.0).1.push_priority(priority, Arc::new(AsyncTask::new(
+            task_id,
+            (self.0).1.clone(),
+            priority,
+            Some(future.boxed_local()))))
+    }
+
+    /// 派发一个指定任务唯一id的异步任务到异步运行时，并立即让出任务的当前运行
+    #[inline]
+    fn spawn_yield_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where
+            F: Future<Output = O> + 'static {
+        self.spawn_priority_by_id(task_id,
+                                  DEFAULT_HIGH_PRIORITY_BOUNDED,
+                                  future)
+    }
+
+    /// 派发一个指定任务唯一id和在指定时间后执行的异步任务到异步运行时，时间单位ms
+    fn spawn_timing_by_id<F>(&self,
+                             task_id: TaskId,
+                             future: F,
+                             time: usize) -> Result<()>
+        where
+            F: Future<Output = O> + 'static {
+        let rt = self.clone();
+        self.spawn_by_id(task_id, async move {
+            (rt.0).3.set_timer(
+                AsyncTimingTask::WaitRun(Arc::new(AsyncTask::new(
+                    rt.alloc::<F::Output>(),
+                    (rt.0).1.clone(),
+                    DEFAULT_MAX_HIGH_PRIORITY_BOUNDED,
+                    Some(future.boxed_local()),
+                ))),
+                time,
+            );
+
+            (rt.0).4.fetch_add(1, Ordering::Relaxed);
+            Default::default()
+        })
     }
 
     /// 挂起指定唯一id的异步任务
-    fn pending<Output>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output> {
-        task_id
-            .0
-            .store(Box::into_raw(Box::new(waker)) as usize, Ordering::Relaxed);
+    fn pending<Output: 'static>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output> {
+        task_id.set_waker::<Output>(waker);
         Poll::Pending
     }
 
     /// 唤醒指定唯一id的异步任务
-    fn wakeup(&self, task_id: &TaskId) {
-        match task_id.0.load(Ordering::Relaxed) {
-            0 => panic!("Single runtime wakeup task failed, reason: task id not exist"),
-            ptr => unsafe {
-                let waker = Box::from_raw(ptr as *mut Waker);
-                waker.wake();
-            },
-        }
+    fn wakeup<Output: 'static>(&self, task_id: &TaskId) {
+        task_id.wakeup::<Output>();
     }
 
     /// 挂起当前异步运行时的当前任务，并在指定的其它运行时上派发一个指定的异步任务，等待其它运行时上的异步任务完成后，唤醒当前运行时的当前任务，并返回其它运行时上的异步任务的值
@@ -303,6 +551,13 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
         let producor = (self.0).2.clone();
 
         AsyncWaitTimeout::new(rt, producor, timeout).boxed_local()
+    }
+
+    /// 立即让出当前任务的执行
+    fn yield_now(&self) -> LocalBoxFuture<'static, ()> {
+        async move {
+            YieldNow(false).await;
+        }.boxed_local()
     }
 
     /// 生成一个异步管道，输入指定流，输入流的每个值通过过滤器生成输出流的值
@@ -347,6 +602,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
         if let Err(e) = (self.0).1.push(Arc::new(AsyncTask::with_context(
             task_id,
             (self.0).1.clone(),
+            DEFAULT_MAX_LOW_PRIORITY_BOUNDED,
             Some(future.boxed_local()),
             context,
         ))) {
@@ -367,98 +623,54 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
         F: Future<Output = O> + 'static,
         C: 'static,
     {
-        (self.0).3.lock().set_timer(
-            AsyncTimingTask::WaitRun(Arc::new(AsyncTask::with_context(
-                task_id.clone(),
-                (self.0).1.clone(),
-                Some(future.boxed_local()),
-                context,
-            ))),
-            time,
-        );
+        let rt = self.clone();
+        self.spawn_by_id(task_id, async move {
+            (rt.0).3.set_timer(
+                AsyncTimingTask::WaitRun(Arc::new(AsyncTask::with_context(
+                    rt.alloc::<F::Output>(),
+                    (rt.0).1.clone(),
+                    DEFAULT_MAX_HIGH_PRIORITY_BOUNDED,
+                    Some(future.boxed_local()),
+                    context,
+                ))),
+                time,
+            );
 
-        Ok(())
+            (rt.0).4.fetch_add(1, Ordering::Relaxed);
+            Default::default()
+        })
     }
 
     fn block_on<F>(&self, future: F) -> Result<F::Output>
     where
         F: Future + 'static,
-        <F as Future>::Output: Default + 'static,
-    {
-        let (sender, receiver) = bounded(1);
-        if let Err(e) = self.spawn(self.alloc(), async move {
+        <F as Future>::Output: Default + 'static {
+        let runner = SingleTaskRunner {
+            is_running: AtomicBool::new(true),
+            runtime: self.clone(),
+            clock: Clock::new(),
+        };
+        let mut result: Option<<F as Future>::Output> = None;
+        let result_raw = (&mut result) as *mut Option<<F as Future>::Output> as usize;
+
+        self.spawn(async move {
             //在指定运行时中执行，并返回结果
             let r = future.await;
-            sender.send(r);
+            unsafe {
+                *(result_raw as *mut Option<<F as Future>::Output>) = Some(r);
+            }
 
             Default::default()
-        }) {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("Block on failed, reason: {:?}", e),
-            ));
-        }
+        });
 
-        let mut count = 0;
-        let mut spin_len = 1;
         loop {
-            count += 1;
-            if count > 3 {
-                //当前异步任务执行时间过长，则自旋后继续等待
-                spin_len = spin(spin_len);
-            }
-
-            //在本地线程中推动当前运行时执行，设置新的定时任务，并唤醒已过期的定时任务
-            (self.0).3.lock().consume(); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
-            loop {
-                let current_time = (self.0).3.lock().is_require_pop(); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
-                if let Some(current_time) = current_time {
-                    //当前有到期的定时异步任务，则只处理到期的一个定时异步任务
-                    let timed_out = (self.0).3.lock().pop(current_time); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
-                    if let Some((handle, timing_task)) = timed_out {
-                        match timing_task {
-                            AsyncTimingTask::Pended(expired) => {
-                                //唤醒休眠的异步任务，并立即执行
-                                self.wakeup(&expired);
-                                if let Some(task) = (self.0).1.try_pop() {
-                                    run_task(task);
-                                }
-                            }
-                            AsyncTimingTask::WaitRun(expired) => {
-                                //立即执行到期的定时异步任务，并立即执行
-                                (self.0).1.push_timed_out(handle as u64, expired);
-                                if let Some(task) = (self.0).1.try_pop() {
-                                    run_task(task);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    //当前没有到期的定时异步任务，则退出本次定时异步任务处理
-                    break;
-                }
-            }
-
-            //继续执行当前任务池中的一个异步任务
-            if let Some(task) = (self.0).1.try_pop() {
-                run_task(task);
-            }
+            //执行异步任务
+            while runner.run()? > 0 {}
 
             //尝试获取异步任务的执行结果
-            match receiver.try_recv() {
-                Err(e) => {
-                    if e.is_disconnected() {
-                        //通道已关闭，则立即返回错误原因
-                        return Err(Error::new(
-                            ErrorKind::Other,
-                            format!("Block on failed, reason: {:?}", e),
-                        ));
-                    }
-                }
-                Ok(result) => {
-                    //异步任务已完成，则立即返回执行结果
-                    return Ok(result);
-                }
+            if let Some(result) = result.take() {
+                //异步任务已完成，则立即返回执行结果
+                return Ok(result);
             }
         }
     }
@@ -493,7 +705,9 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
                     usize,
                     Arc<P>,
                     Sender<(usize, AsyncTimingTask<P, O>)>,
-                    Mutex<AsyncTaskTimer<P, O>>,
+                    AsyncTaskTimer<P, O>,
+                    AtomicUsize,
+                    AtomicUsize,
                 ),
             )
         };
@@ -511,7 +725,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
     // 派发一个指定的异步任务到异步运行时
     pub(crate) fn spawn_raw(raw: *const (), future: LocalBoxFuture<'static, O>) -> Result<()> {
         let rt = SingleTaskRuntime::<O, P>::from_raw(raw);
-        let result = rt.spawn(rt.alloc(), future);
+        let result = rt.spawn_by_id(rt.alloc::<O>(), future);
         Arc::into_raw(rt.0); //避免提前释放
         result
     }
@@ -523,7 +737,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
         timeout: usize,
     ) -> Result<()> {
         let rt = SingleTaskRuntime::<O, P>::from_raw(raw);
-        let result = rt.spawn_timing(rt.alloc(), future, timeout);
+        let result = rt.spawn_timing_by_id(rt.alloc::<O>(), future, timeout);
         Arc::into_raw(rt.0); //避免提前释放
         result
     }
@@ -544,8 +758,9 @@ pub struct SingleTaskRunner<
     O: Default + 'static,
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = SingleTaskPool<O>,
 > {
-    is_running: AtomicBool,           //是否开始运行
-    runtime: SingleTaskRuntime<O, P>, //异步单线程任务运行时
+    is_running: AtomicBool,                 //是否开始运行
+    runtime:    SingleTaskRuntime<O, P>,    //异步单线程任务运行时
+    clock:      Clock,                      //执行器的时钟
 }
 
 unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Send
@@ -568,20 +783,27 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
 {
     /// 用指定的任务池构建单线程异步运行时
     pub fn new(pool: P) -> Self {
-        let rt_uid = pool.get_thread_id();
+        let rt_uid = pool.get_thread_id() >> 32;
         let pool = Arc::new(pool);
 
         //构建本地定时器和定时异步任务生产者
         let timer = AsyncTaskTimer::new();
         let producor = timer.get_producor().clone();
-        let timer = Mutex::new(timer);
+        let timer_producor_count = AtomicUsize::new(0);
+        let timer_consume_count = AtomicUsize::new(0);
 
         //构建单线程任务运行时
-        let runtime = SingleTaskRuntime(Arc::new((rt_uid, pool, producor, timer)));
+        let runtime = SingleTaskRuntime(Arc::new((rt_uid,
+                                                  pool,
+                                                  producor,
+                                                  timer,
+                                                  timer_producor_count,
+                                                  timer_consume_count)));
 
         SingleTaskRunner {
             is_running: AtomicBool::new(false),
             runtime,
+            clock: Clock::new(),
         }
     }
 
@@ -636,35 +858,44 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
         }
 
         //设置新的定时任务，并唤醒已过期的定时任务
-        (self.runtime.0).3.lock().consume(); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
+        let mut pop_len = 0;
+        (self.runtime.0)
+            .4
+            .fetch_add((self.runtime.0).3.consume(),
+                       Ordering::Relaxed);
         loop {
-            let current_time = (self.runtime.0).3.lock().is_require_pop(); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
+            let current_time = (self.runtime.0).3.is_require_pop();
             if let Some(current_time) = current_time {
                 //当前有到期的定时异步任务，则只处理到期的一个定时异步任务
-                let timed_out = (self.runtime.0).3.lock().pop(current_time); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
-                if let Some((handle, timing_task)) = timed_out {
+                let timed_out = (self.runtime.0).3.pop(current_time);
+                if let Some((_handle, timing_task)) = timed_out {
                     match timing_task {
                         AsyncTimingTask::Pended(expired) => {
                             //唤醒休眠的异步任务，并立即执行
-                            self.runtime.wakeup(&expired);
+                            self.runtime.wakeup::<O>(&expired);
                             if let Some(task) = (self.runtime.0).1.try_pop() {
                                 run_task(task);
                             }
                         }
                         AsyncTimingTask::WaitRun(expired) => {
                             //立即执行到期的定时异步任务，并立即执行
-                            (self.runtime.0).1.push_timed_out(handle as u64, expired);
+                            (self.runtime.0).1.push_priority(DEFAULT_MAX_HIGH_PRIORITY_BOUNDED, expired);
                             if let Some(task) = (self.runtime.0).1.try_pop() {
                                 run_task(task);
                             }
                         }
                     }
+                    pop_len += 1;
                 }
             } else {
                 //当前没有到期的定时异步任务，则退出本次定时异步任务处理
                 break;
             }
         }
+        (self.runtime.0)
+            .5
+            .fetch_add(pop_len,
+                       Ordering::Relaxed);
 
         //继续执行当前任务池中的一个异步任务
         match (self.runtime.0).1.try_pop() {
@@ -690,57 +921,63 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
             ));
         }
 
-        //获取当前任务池中的所有异步任务
-        let mut tasks = (self.runtime.0).1.try_pop_all();
-
-        //设置新的定时任务，并唤醒已过期的定时任务
-        (self.runtime.0).3.lock().consume(); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
         loop {
-            let current_time = (self.runtime.0).3.lock().is_require_pop(); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
-            if let Some(current_time) = current_time {
-                //当前有到期的定时异步任务，则开始处理到期的所有定时异步任务
-                loop {
-                    let timed_out = (self.runtime.0).3.lock().pop(current_time); //运行时内部的锁临界区要尽可能的小，避免出现锁重入
+            //设置新的定时任务，并唤醒已过期的定时任务
+            let mut pop_len = 0;
+            let mut start_run_millis = self.clock.recent(); //重置开运行时长
+            (self.runtime.0)
+                .4
+                .fetch_add((self.runtime.0).3.consume(),
+                           Ordering::Relaxed);
+            loop {
+                let current_time = (self.runtime.0).3.is_require_pop();
+                if let Some(current_time) = current_time {
+                    //当前有到期的定时异步任务，则只处理到期的一个定时异步任务
+                    let timed_out = (self.runtime.0).3.pop(current_time);
                     if let Some((handle, timing_task)) = timed_out {
                         match timing_task {
                             AsyncTimingTask::Pended(expired) => {
                                 //唤醒休眠的异步任务，并立即执行
-                                self.runtime.wakeup(&expired);
+                                self.runtime.wakeup::<O>(&expired);
                                 if let Some(task) = (self.runtime.0).1.try_pop() {
                                     run_task(task);
                                 }
                             }
                             AsyncTimingTask::WaitRun(expired) => {
                                 //立即执行到期的定时异步任务，并立即执行
-                                (self.runtime.0).1.push_timed_out(handle as u64, expired);
+                                (self.runtime.0).1.push_priority(handle, expired);
                                 if let Some(task) = (self.runtime.0).1.try_pop() {
                                     run_task(task);
                                 }
                             }
                         }
+                        pop_len += 1;
+                    }
+                } else {
+                    //当前没有到期的定时异步任务，则退出本次定时异步任务处理
+                    break;
+                }
+            }
+            (self.runtime.0)
+                .5
+                .fetch_add(pop_len,
+                           Ordering::Relaxed);
 
-                        if let Some(task) = tasks.next() {
-                            //执行当前所有异步任务中的一个异步任务，避免定时异步任务占用当前运行时的所有执行时间
-                            run_task(task);
-                        }
-                    } else {
-                        //当前所有的到期任务已处理完，则退出本次定时异步任务处理
-                        break;
+            //继续执行当前任务池中的一个异步任务
+            while self
+                .clock
+                .recent()
+                .duration_since(start_run_millis)
+                .as_millis() < 1 {
+                match (self.runtime.0).1.try_pop() {
+                    None => {
+                        //当前没有异步任务，则立即返回
+                        return Ok((self.runtime.0).1.len());
+                    }
+                    Some(task) => {
+                        run_task(task);
                     }
                 }
-            } else {
-                //当前没有到期的定时异步任务，则退出本次定时异步任务处理
-                break;
-            }
-        }
-
-        loop {
-            //继续执行剩余的异步任务
-            if let Some(task) = tasks.next() {
-                run_task(task);
-            } else {
-                //没有需要获取的定时任务，且当前异步任务池中的任务已执行完，则退出
-                return Ok((self.runtime.0).1.len());
             }
         }
     }
@@ -817,13 +1054,13 @@ fn test_single_runtime() {
         }
     });
 
-    rt.spawn(rt.alloc(), async move {
-        if let Err(e) = spawn_local(async move {
-            assert!(true);
-        }) {
-            panic!("Test spawn local failed, reason: {:?}", e);
-        }
-    });
+    rt.spawn(async move {
+            if let Err(e) = spawn_local(async move {
+                assert!(true);
+            }) {
+                panic!("Test spawn local failed, reason: {:?}", e);
+            }
+        });
 
     let rt_copy = rt.clone();
     let thread_handle = thread::spawn(move || {
@@ -861,9 +1098,9 @@ fn test_single_runtime() {
         let start = Instant::now();
         for _ in 0..2500000 {
             let counter_copy = counter0.clone();
-            if let Err(e) = rt0.spawn(rt0.alloc(), async move {
-                counter_copy.fetch_add(1);
-            }) {
+            if let Err(e) = rt0.spawn(async move {
+                            counter_copy.fetch_add(1);
+                        }) {
                 panic!("spawn singale task failed, reason: {:?}", e);
             }
         }
@@ -873,9 +1110,9 @@ fn test_single_runtime() {
         let start = Instant::now();
         for _ in 0..2500000 {
             let counter_copy = counter1.clone();
-            if let Err(e) = rt1.spawn(rt1.alloc(), async move {
-                counter_copy.fetch_add(1);
-            }) {
+            if let Err(e) = rt1.spawn(async move {
+                            counter_copy.fetch_add(1);
+                        }) {
                 panic!("spawn singale task failed, reason: {:?}", e);
             }
         }
@@ -885,9 +1122,9 @@ fn test_single_runtime() {
         let start = Instant::now();
         for _ in 0..2500000 {
             let counter_copy = counter2.clone();
-            if let Err(e) = rt2.spawn(rt2.alloc(), async move {
-                counter_copy.fetch_add(1);
-            }) {
+            if let Err(e) = rt2.spawn(async move {
+                            counter_copy.fetch_add(1);
+                        }) {
                 panic!("spawn singale task failed, reason: {:?}", e);
             }
         }
@@ -897,9 +1134,9 @@ fn test_single_runtime() {
         let start = Instant::now();
         for _ in 0..2500000 {
             let counter_copy = counter3.clone();
-            if let Err(e) = rt3.spawn(rt3.alloc(), async move {
-                counter_copy.fetch_add(1);
-            }) {
+            if let Err(e) = rt3.spawn(async move {
+                            counter_copy.fetch_add(1);
+                        }) {
                 panic!("spawn singale task failed, reason: {:?}", e);
             }
         }

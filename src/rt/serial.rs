@@ -25,9 +25,9 @@ use pi_time::Instant;
 use pi_hash::XHashMap;
 use pi_cancel_timer::Timer;
 use slotmap::{Key, KeyData};
+use quanta::{Clock, Upkeep, Handle, Instant as QInstant};
 
-use crate::{lock::{spin,
-                   spin_lock::SpinLock},
+use crate::{lock::spin,
             rt::{PI_ASYNC_LOCAL_THREAD_ASYNC_RUNTIME, TaskId, AsyncPipelineResult,
                  serial_local_thread::{LocalTaskRunner, LocalTaskRuntime},
                  serial_single_thread::{SingleTaskPool, SingleTaskRunner, SingleTaskRuntime},
@@ -43,6 +43,7 @@ pub struct AsyncTask<
     uid:        TaskId,                                     //任务唯一id
     future:     Mutex<Option<LocalBoxFuture<'static, O>>>,  //异步任务
     pool:       Arc<P>,                                     //异步任务池
+    priority:   usize,                                      //异步任务优先级
     context:    Option<UnsafeCell<Box<dyn Any>>>,           //异步任务上下文
 }
 
@@ -154,11 +155,13 @@ impl<
     /// 构建单线程任务
     pub fn new(uid: TaskId,
                pool: Arc<P>,
+               priority: usize,
                future: Option<LocalBoxFuture<'static, O>>) -> AsyncTask<P, O> {
         AsyncTask {
             uid,
             future: Mutex::new(future),
             pool,
+            priority,
             context: None,
         }
     }
@@ -166,6 +169,7 @@ impl<
     /// 使用指定上下文构建单线程任务
     pub fn with_context<C: 'static>(uid: TaskId,
                                     pool: Arc<P>,
+                                    priority: usize,
                                     future: Option<LocalBoxFuture<'static, O>>,
                                     context: C) -> AsyncTask<P, O> {
         let any = Box::new(context);
@@ -174,12 +178,14 @@ impl<
             uid,
             future: Mutex::new(future),
             pool,
+            priority,
             context: Some(UnsafeCell::new(any)),
         }
     }
 
     /// 使用指定异步运行时和上下文构建单线程任务
     pub fn with_runtime_and_context<RT, C>(runtime: &RT,
+                                           priority: usize,
                                            future: Option<LocalBoxFuture<'static, O>>,
                                            context: C) -> AsyncTask<P, O>
         where RT: AsyncRuntime<O, Pool = P>,
@@ -187,16 +193,17 @@ impl<
         let any = Box::new(context);
 
         AsyncTask {
-            uid: runtime.alloc(),
+            uid: runtime.alloc::<O>(),
             future: Mutex::new(future),
             pool: runtime.shared_pool(),
+            priority,
             context: Some(UnsafeCell::new(any)),
         }
     }
 
     /// 检查是否允许唤醒
     pub fn is_enable_wakeup(&self) -> bool {
-        self.uid.0.load(Ordering::Relaxed) > 0
+        self.uid.exist_waker::<O>()
     }
 
     /// 获取内部任务
@@ -207,6 +214,19 @@ impl<
     /// 设置内部任务
     pub fn set_inner(&self, inner: Option<LocalBoxFuture<'static, O>>) {
         *self.future.lock() = inner;
+    }
+
+    /// 获取任务的所有者
+    #[inline]
+    pub fn owner(&self) -> usize {
+        unsafe {
+            *self.uid.0.get() as usize
+        }
+    }
+
+    /// 获取异步任务优先级
+    pub fn priority(&self) -> usize {
+        self.priority
     }
 
     //判断异步任务是否有上下文
@@ -269,8 +289,11 @@ pub trait AsyncTaskPool<O: Default + 'static = ()>: Default + 'static {
     /// 将异步任务加入异步任务池
     fn push(&self, task: Arc<AsyncTask<Self::Pool, O>>) -> Result<()>;
 
-    /// 将已超时的异步任务加入任务池
-    fn push_timed_out(&self, index: u64, task: Arc<AsyncTask<Self::Pool, O>>) -> Result<()>;
+    /// 将异步任务加入本地异步任务池
+    fn push_local(&self, task: Arc<AsyncTask<Self::Pool, O>>) -> Result<()>;
+
+    /// 将指定了优先级的异步任务加入任务池
+    fn push_priority(&self, priority: usize, task: Arc<AsyncTask<Self::Pool, O>>) -> Result<()>;
 
     /// 异步任务被唤醒时，将异步任务继续加入异步任务池
     fn push_keep(&self, task: Arc<AsyncTask<Self::Pool, O>>) -> Result<()>;
@@ -362,21 +385,59 @@ pub trait AsyncRuntime<O: Default + 'static = ()>: Clone + Send + Sync + 'static
     fn len(&self) -> usize;
 
     /// 分配异步任务的唯一id
-    fn alloc(&self) -> TaskId;
+    fn alloc<R: 'static>(&self) -> TaskId;
 
     /// 派发一个指定的异步任务到异步运行时
-    fn spawn<F>(&self, task_id: TaskId, future: F) -> Result<()>
+    fn spawn<F>(&self, future: F) -> Result<TaskId>
+        where F: Future<Output = O> + 'static;
+
+    /// 派发一个异步任务到本地异步运行时，如果本地没有本异步运行时，则会派发到当前运行时中
+    fn spawn_local<F>(&self, future: F) -> Result<TaskId>
+        where F: Future<Output = O> + 'static;
+
+    /// 派发一个指定优先级的异步任务到异步运行时
+    fn spawn_priority<F>(&self, priority: usize, future: F) -> Result<TaskId>
+        where F: Future<Output = O> + 'static;
+
+    /// 派发一个异步任务到异步运行时，并立即让出任务的当前运行
+    fn spawn_yield<F>(&self, future: F) -> Result<TaskId>
         where F: Future<Output = O> + 'static;
 
     /// 派发一个在指定时间后执行的异步任务到异步运行时，时间单位ms
-    fn spawn_timing<F>(&self, task_id: TaskId, future: F, time: usize) -> Result<()>
+    fn spawn_timing<F>(&self, future: F, time: usize) -> Result<TaskId>
+        where F: Future<Output = O> + 'static;
+
+    /// 派发一个指定任务唯一id的异步任务到异步运行时
+    fn spawn_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where F: Future<Output = O> + 'static;
+
+    /// 派发一个指定任务唯一id的异步任务到本地异步运行时，如果本地没有本异步运行时，则会派发到当前运行时中
+    fn spawn_local_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where F: Future<Output = O> + 'static;
+
+    /// 派发一个指定任务唯一id和任务优先级的异步任务到异步运行时
+    fn spawn_priority_by_id<F>(&self,
+                               task_id: TaskId,
+                               priority: usize,
+                               future: F) -> Result<()>
+        where F: Future<Output = O> + 'static;
+
+    /// 派发一个指定任务唯一id的异步任务到异步运行时，并立即让出任务的当前运行
+    fn spawn_yield_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where F: Future<Output = O> + 'static;
+
+    /// 派发一个指定任务唯一id和在指定时间后执行的异步任务到异步运行时，时间单位ms
+    fn spawn_timing_by_id<F>(&self,
+                             task_id: TaskId,
+                             future: F,
+                             time: usize) -> Result<()>
         where F: Future<Output = O> + 'static;
 
     /// 挂起指定唯一id的异步任务
-    fn pending<Output>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output>;
+    fn pending<Output: 'static>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output>;
 
     /// 唤醒指定唯一id的异步任务
-    fn wakeup(&self, task_id: &TaskId);
+    fn wakeup<Output: 'static>(&self, task_id: &TaskId);
 
     /// 挂起当前异步运行时的当前任务，并在指定的其它运行时上派发一个指定的异步任务，等待其它运行时上的异步任务完成后，唤醒当前运行时的当前任务，并返回其它运行时上的异步任务的值
     fn wait<V: 'static>(&self) -> AsyncWait<V>;
@@ -392,6 +453,9 @@ pub trait AsyncRuntime<O: Default + 'static = ()>: Clone + Send + Sync + 'static
 
     /// 挂起当前异步运行时的当前任务，等待指定的时间后唤醒当前任务
     fn timeout(&self, timeout: usize) -> LocalBoxFuture<'static, ()>;
+
+    /// 立即让出当前任务的执行
+    fn yield_now(&self) -> LocalBoxFuture<'static, ()>;
 
     /// 生成一个异步管道，输入指定流，输入流的每个值通过过滤器生成输出流的值
     fn pipeline<S, SO, F, FO>(&self, input: S, filter: F) -> LocalBoxStream<'static, FO>
@@ -491,6 +555,7 @@ impl<O: Default + 'static> AsyncRuntimeBuilder<O> {
         };
 
         //创建线程并在线程中执行异步运行时
+        let clock = Clock::new();
         let runner_copy = runner.clone();
         let rt_copy = runner.get_runtime();
         let rt = runner.startup(
@@ -499,13 +564,16 @@ impl<O: Default + 'static> AsyncRuntimeBuilder<O> {
             sleep_timeout,
             loop_interval,
             move || {
-                let now = Instant::now();
+                let now = clock.recent();
                 match runner_copy.run_once() {
                     Err(e) => {
                         panic!("Run runner failed, reason: {:?}", e);
                     },
                     Ok(len) => {
-                        (len == 0, Instant::now().duration_since(now))
+                        (len == 0,
+                         clock
+                             .recent()
+                             .duration_since(now))
                     },
                 }
             },
@@ -1297,7 +1365,8 @@ pub struct AsyncTaskTimer<
     producor:   Sender<(usize, AsyncTimingTask<P, O>)>,                     //定时任务生产者
     consumer:   Receiver<(usize, AsyncTimingTask<P, O>)>,                   //定时任务消费者
     timer:      Arc<RefCell<Timer<AsyncTimingTask<P, O>, 1000, 60, 3>>>,    //定时器
-    now:        Instant,                                                    //当前时间
+    clock:      Clock,                                                      //定时器时钟
+    now:        QInstant,                                                   //当前时间
 }
 
 unsafe impl<
@@ -1316,12 +1385,14 @@ impl<
     /// 构建异步任务本地定时器
     pub fn new() -> Self {
         let (producor, consumer) = unbounded();
-        let now = Instant::now();
+        let clock = Clock::new();
+        let now = clock.recent();
 
         AsyncTaskTimer {
             producor,
             consumer,
             timer: Arc::new(RefCell::new(Timer::<AsyncTimingTask<P, O>, 1000, 60, 3>::default())),
+            clock,
             now,
         }
     }
@@ -1375,7 +1446,11 @@ impl<
 
     /// 判断当前时间是否有可以弹出的任务，如果有可以弹出的任务，则返回当前时间，否则返回空
     pub fn is_require_pop(&self) -> Option<u64> {
-        let current_time = self.now.elapsed().as_millis() as u64;
+        let current_time = self
+            .clock
+            .recent()
+            .duration_since(self.now)
+            .as_millis() as u64;
         if self.timer.borrow_mut().is_ok(current_time) {
             Some(current_time)
         } else {
@@ -1434,7 +1509,7 @@ impl<
             (&self).expired.store(true, Ordering::Relaxed);
         }
 
-        let task_id = self.rt.alloc();
+        let task_id = self.rt.alloc::<O>();
         let reply = self.rt.pending(&task_id, cx.waker().clone());
 
         //发送超时请求，并返回
@@ -1578,13 +1653,13 @@ impl<V: 'static> AsyncWaitAny<V> {
               O: Default + 'static,
               F: Future<Output = Result<V>> + 'static {
         let producor = self.producor.clone();
-        rt.spawn(rt.alloc(), async move {
-            let value = future.await;
-            producor.into_send_async(value).await;
+        rt.spawn_by_id(rt.alloc::<O>(), async move {
+                    let value = future.await;
+                    producor.into_send_async(value).await;
 
-            //返回异步任务的默认值
-            Default::default()
-        })
+                    //返回异步任务的默认值
+                    Default::default()
+                })
     }
 
     /// 派发指定任务到本地运行时，并返回派发是否成功
@@ -1659,13 +1734,13 @@ impl<V: 'static> AsyncWaitAnyCallback<V> {
               O: Default + 'static,
               F: Future<Output = Result<V>> + 'static {
         let producor = self.producor.clone();
-        rt.spawn(rt.alloc(), async move {
-            let value = future.await;
-            producor.into_send_async(value).await;
+        rt.spawn_by_id(rt.alloc::<O>(), async move {
+                    let value = future.await;
+                    producor.into_send_async(value).await;
 
-            //返回异步任务的默认值
-            Default::default()
-        })
+                    //返回异步任务的默认值
+                    Default::default()
+                })
     }
 
     /// 派发指定任务到本地运行时，并返回派发是否成功
@@ -1770,13 +1845,13 @@ impl<V: 'static> AsyncMapReduce<V> {
 
         let index = self.count;
         let producor = self.producor.clone();
-        rt.spawn(rt.alloc(), async move {
-            let value = future.await;
-            producor.into_send_async((index, value)).await;
+        rt.spawn(async move {
+                    let value = future.await;
+                    producor.into_send_async((index, value)).await;
 
-            //返回异步任务的默认值
-            Default::default()
-        })?;
+                    //返回异步任务的默认值
+                    Default::default()
+                })?;
 
         self.count += 1; //派发任务成功，则计数
         Ok(index)

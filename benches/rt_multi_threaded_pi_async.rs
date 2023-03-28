@@ -2,202 +2,435 @@
 
 extern crate test;
 
-use futures::channel::oneshot;
-use futures::Future;
-use pi_async::prelude::{MultiTaskRuntime, MultiTaskRuntimeBuilder, StealableTaskPool};
-use pi_async::rt::{AsyncRuntime, AsyncRuntimeExt, TaskId};
+use test::Bencher;
+
+use std::thread;
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::mpsc::SyncSender;
 use std::sync::{mpsc, Arc};
 use std::task::{Context, Poll};
-use test::Bencher;
+use std::time::Duration;
+use futures::channel::oneshot;
+use futures::Future;
+use crossbeam_channel::{Sender, bounded};
+use pi_async::rt::{startup_global_time_loop,
+                   AsyncRuntime, AsyncRuntimeExt, TaskId,
+                   multi_thread::{StealableTaskPool, MultiTaskRuntime, MultiTaskRuntimeBuilder}};
 
-fn runtime() -> MultiTaskRuntime<()> {
-    let pool = StealableTaskPool::with(8, 8);
-    let builer = MultiTaskRuntimeBuilder::new(pool)
-        .set_timer_interval(1)
-        .init_worker_size(8)
-        .set_worker_limit(8, 8);
-    builer.build()
+#[derive(Clone)]
+struct AtomicCounter(Sender<()>);
+impl Drop for AtomicCounter {
+    fn drop(&mut self) {
+        self.0.send(()); //通知执行完成
+    }
+}
+
+fn rt(weights: [u8; 2]) -> MultiTaskRuntime<(), StealableTaskPool<()>> {
+    let pool = StealableTaskPool::with(4,
+                                       1000000,
+                                       weights,
+                                       3000);
+    MultiTaskRuntimeBuilder::new(pool)
+        .thread_stack_size(2 * 1024 * 1024)
+        .init_worker_size(4)
+        .set_worker_limit(4, 4)
+        .build()
+}
+
+#[bench]
+fn spawn_empty_many(b: &mut Bencher) {
+    let _handle = startup_global_time_loop(100);
+
+    thread::sleep(Duration::from_millis(10000));
+
+    let rt = rt([254, 1]);
+    let (send, recv) = bounded(1);
+
+    b.iter(move || {
+        let rt0 = rt.clone();
+        let rt1 = rt.clone();
+        let rt2 = rt.clone();
+        let rt3 = rt.clone();
+
+        {
+            let counter = Arc::new(AtomicCounter(send.clone()));
+            let counter0 = counter.clone();
+            let counter1 = counter.clone();
+            let counter2 = counter.clone();
+            let counter3 = counter.clone();
+
+            thread::spawn(move || {
+                for _ in 0..2500 {
+                    let counter_copy = counter0.clone();
+                    if let Err(e) = rt0.spawn(async move {
+                        counter_copy;
+                    }) {
+                        panic!("!!!> spawn empty singale task failed, reason: {:?}", e);
+                    }
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 2500..5000 {
+                    let counter_copy = counter1.clone();
+                    if let Err(e) = rt1.spawn(async move {
+                        counter_copy;
+                    }) {
+                        panic!("!!!> spawn empty singale task failed, reason: {:?}", e);
+                    }
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 5000..7500 {
+                    let counter_copy = counter2.clone();
+                    if let Err(e) = rt2.spawn(async move {
+                        counter_copy;
+                    }) {
+                        panic!("!!!> spawn empty singale task failed, reason: {:?}", e);
+                    }
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 7500..10000 {
+                    let counter_copy = counter3.clone();
+                    if let Err(e) = rt3.spawn(async move {
+                        counter_copy;
+                    }) {
+                        println!("!!!> spawn empty singale task failed, reason: {:?}", e);
+                    }
+                }
+            });
+        }
+
+        let _ = recv.clone().recv().unwrap();
+    });
+}
+
+#[bench]
+fn await_empty_many(b: &mut Bencher) {
+    let _handle = startup_global_time_loop(100);
+
+    thread::sleep(Duration::from_millis(10000));
+
+    let rt = rt([254, 1]);
+    let (send, recv) = bounded(1);
+
+    b.iter(move || {
+        {
+            let counter = Arc::new(AtomicCounter(send.clone()));
+            let counter0 = counter.clone();
+            let counter1 = counter.clone();
+            let counter2 = counter.clone();
+            let counter3 = counter.clone();
+
+            rt.spawn(async move {
+                for _ in 0..2500 {
+                    let counter_copy = counter0.clone();
+                    async move {
+                        counter_copy;
+                    }.await;
+                }
+            });
+
+            rt.spawn(async move {
+                for _ in 2500..5000 {
+                    let counter_copy = counter1.clone();
+                    async move {
+                        counter_copy;
+                    }.await;
+                }
+            });
+
+            rt.spawn(async move {
+                for _ in 5000..7500 {
+                    let counter_copy = counter2.clone();
+                    async move {
+                        counter_copy;
+                    }.await;
+                }
+            });
+
+            rt.spawn(async move {
+                for _ in 7500..10000 {
+                    let counter_copy = counter3.clone();
+                    async move {
+                        counter_copy;
+                    }.await;
+                }
+            });
+        }
+
+        let _ = recv.clone().recv().unwrap();
+    });
 }
 
 #[bench]
 fn spawn_many(b: &mut Bencher) {
-    let rt = runtime();
-    const NUM_SPAWN: usize = 10_000;
-    let (tx, rx) = mpsc::sync_channel(1000);
-    let rem = Arc::new(AtomicUsize::new(0));
+    let _handle = startup_global_time_loop(100);
 
-    b.iter(|| {
-        let tx = tx.clone();
-        rem.store(NUM_SPAWN, Relaxed);
-        let rt_copy = rt.clone();
-        let rem = rem.clone();
+    thread::sleep(Duration::from_millis(10000));
 
-        rt.block_on(async move {
-            for _ in 0..NUM_SPAWN {
-                let rem = rem.clone();
-                let tx = tx.clone();
-                rt_copy
-                    .spawn(rt_copy.alloc(), async move {
-                        // let tx_copy: SyncSender<()> = tx.clone();
-                        if 1 == rem.fetch_sub(1, Relaxed) {
-                            tx.send(()).unwrap();
-                        }
-                    })
-                    .unwrap();
-            }
-        })
-        .unwrap();
-        let _ = rx.recv().unwrap();
+
+    let rt = rt([1, 254]);
+    let (send, recv) = bounded(1);
+
+    b.iter(move || {
+        let rt0 = rt.clone();
+        let rt1 = rt.clone();
+        let rt2 = rt.clone();
+        let rt3 = rt.clone();
+
+        {
+            let counter = Arc::new(AtomicCounter(send.clone()));
+            let counter0 = counter.clone();
+            let counter1 = counter.clone();
+            let counter2 = counter.clone();
+            let counter3 = counter.clone();
+
+            let rt0_copy = rt0.clone();
+            rt0.spawn(async move {
+                for _ in 0..2500 {
+                    let counter_copy = counter0.clone();
+                    rt0_copy.spawn_local(async move {
+                        counter_copy;
+                    });
+                }
+            });
+
+            let rt1_copy = rt1.clone();
+            rt1.spawn(async move {
+                for _ in 2500..5000 {
+                    let counter_copy = counter1.clone();
+                    rt1_copy.spawn_local(async move {
+                        counter_copy;
+                    });
+                }
+            });
+
+            let rt2_copy = rt2.clone();
+            rt2.spawn(async move {
+                for _ in 5000..7500 {
+                    let counter_copy = counter2.clone();
+                    rt2_copy.spawn_local(async move {
+                        counter_copy;
+                    });
+                }
+            });
+
+            let rt3_copy = rt3.clone();
+            rt3.spawn(async move {
+                for _ in 7500..10000 {
+                    let counter_copy = counter3.clone();
+                    rt3_copy.spawn_local(async move {
+                        counter_copy;
+                    });
+                }
+            });
+        }
+
+        let _ = recv.clone().recv().unwrap();
     });
 }
 
-struct TestFuture1(TaskId, MultiTaskRuntime<()>);
+#[bench]
+fn yield_many(b: &mut Bencher) {
+    let _handle = startup_global_time_loop(100);
 
-unsafe impl Send for TestFuture1 {}
-unsafe impl Sync for TestFuture1 {}
+    thread::sleep(Duration::from_millis(10000));
 
-impl Future for TestFuture1 {
-    type Output = String;
+    let rt = rt([1, 254]);
+    const NUM_YIELD: usize = 1_000;
+    const TASKS: usize = 200;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.1.pending(&self.0, cx.waker().clone())
-    }
+    b.iter(move || {
+        let (send, recv) = bounded(1);
+
+        {
+            let counter = Arc::new(AtomicCounter(send));
+            for _ in 0..TASKS {
+                let rt_copy = rt.clone();
+                let counter_copy = counter.clone();
+                let _ = rt.spawn(async move {
+                    for _ in 0..NUM_YIELD {
+                        rt_copy.yield_now().await;
+                    }
+                    counter_copy;
+                });
+            }
+        }
+
+        let _ = recv.recv().unwrap();
+    });
 }
-
-impl TestFuture1 {
-    pub fn new(rt: MultiTaskRuntime<()>, uid: TaskId) -> Self {
-        TestFuture1(uid, rt)
-    }
-}
-
-// #[bench]
-// fn yield_many(b: &mut Bencher) {
-//     let rt = runtime();
-//     const NUM_YIELD: usize = 1_000;
-//     const TASKS: usize = 200;
-
-//     let (tx, rx) = mpsc::sync_channel(TASKS);
-//     let rt_copy = rt.clone();
-//     b.iter(move || {
-//         for _ in 0..TASKS {
-//             let tx = tx.clone();
-//             let task_id = rt_copy.alloc();
-//             let task_id_copy = task_id.clone();
-//             let task_id_copy2 = task_id.clone();
-
-//             let rt_copy2 = rt_copy.clone();
-//             rt_copy
-//                 .spawn(task_id, async move {
-//                     for _ in 0..NUM_YIELD {
-//                         // TODO
-//                         let future_test = TestFuture1::new(rt_copy2.clone(), task_id_copy.clone());
-//                         future_test.await;
-
-//                         // task::yield_now().await;
-//                     }
-
-//                     tx.send(()).unwrap();
-//                 })
-//                 .unwrap();
-//             // rt_copy.wakeup(&task_id_copy2);
-//         }
-
-//         for _ in 0..TASKS {
-//             let _ = rx.recv().unwrap();
-//         }
-//     });
-// }
 
 #[bench]
 fn ping_pong(b: &mut Bencher) {
-    let rt = runtime();
+    let _handle = startup_global_time_loop(100);
+
+    thread::sleep(Duration::from_millis(10000));
 
     const NUM_PINGS: usize = 1_000;
-
-    let (done_tx, done_rx) = mpsc::sync_channel(1000);
+    let rt = rt([1, 254]);
     let rem = Arc::new(AtomicUsize::new(0));
 
     b.iter(|| {
-        let rt_copy = rt.clone();
-        let done_tx: SyncSender<()> = done_tx.clone();
+        let (send, recv) = bounded(1);
         let rem = rem.clone();
         rem.store(NUM_PINGS, Relaxed);
 
-        rt.block_on(async move {
-            let rt_copy2 = rt_copy.clone();
-            rt_copy
-                .spawn(rt_copy.alloc(), async move {
-                    for _ in 0..NUM_PINGS {
-                        let rem = rem.clone();
-                        let done_tx = done_tx.clone();
-                        let rt_copy3 = rt_copy2.clone();
-                        rt_copy2
-                            .spawn(rt_copy2.alloc(), async move {
-                                let (tx1, rx1) = oneshot::channel();
-                                let (tx2, rx2) = oneshot::channel();
+        let rt_copy = rt.clone();
+        let _ = rt.spawn(async move {
+            let rt_clone = rt_copy.clone();
+            let _ = rt_copy.spawn_local(async move {
+                for _ in 0..NUM_PINGS {
+                    let rem = rem.clone();
+                    let send = send.clone();
+                    let rt_clone_ = rt_clone.clone();
+                    let _ = rt_clone.spawn_local(async move {
+                        let (tx1, rx1) = oneshot::channel();
+                        let (tx2, rx2) = oneshot::channel();
 
-                                rt_copy3
-                                    .spawn(rt_copy3.alloc(), async move {
-                                        rx1.await.unwrap();
-                                        tx2.send(()).unwrap();
-                                    })
-                                    .unwrap();
+                        rt_clone_.spawn_local(async move {
+                            rx1.await.unwrap();
+                            tx2.send(()).unwrap();
+                        });
 
-                                tx1.send(()).unwrap();
-                                rx2.await.unwrap();
+                        tx1.send(()).unwrap();
+                        rx2.await.unwrap();
 
-                                if 1 == rem.fetch_sub(1, Relaxed) {
-                                    done_tx.send(()).unwrap();
-                                }
-                            })
-                            .unwrap();
-                    }
-                })
-                .unwrap();
-        })
-        .unwrap();
-        done_rx.recv().unwrap();
+                        if 1 == rem.fetch_sub(1, Relaxed) {
+                            send.send(()).unwrap();
+                        }
+                    });
+                }
+            });
+        });
+
+        let _ = recv.recv().unwrap();
     });
 }
 
 #[bench]
 fn chained_spawn(b: &mut Bencher) {
-    let rt = runtime();
-    const ITER: usize = 1_000;
+    let _handle = startup_global_time_loop(100);
 
-    fn iter(rt: MultiTaskRuntime, done_tx: mpsc::SyncSender<()>, n: usize) {
+    thread::sleep(Duration::from_millis(10000));
+
+    const ITER: usize = 1_000;
+    let rt = rt([1, 254]);
+    let (send, recv) = bounded(1);
+
+    fn iter(rt: MultiTaskRuntime<(), StealableTaskPool<()>>,
+            send: Sender<()>,
+            n: usize) {
         if n == 0 {
-            done_tx.send(()).unwrap();
+            send.send(()).unwrap();
         } else {
             let rt_copy = rt.clone();
-            rt.spawn(rt.alloc(), async move {
-                iter(rt_copy.clone(), done_tx, n - 1);
-            })
-            .unwrap();
+            let _ = rt.spawn_priority(10, async move {
+                iter(rt_copy.clone(), send, n - 1);
+            });
         }
     }
 
-    let (done_tx, done_rx) = mpsc::sync_channel(1000);
-
     b.iter(move || {
         let rt_copy = rt.clone();
-        let rt_copy2 = rt.clone();
-        let rt_copy3 = rt.clone();
-        let done_tx = done_tx.clone();
+        let send_copy = send.clone();
 
-        rt_copy
-            .block_on(async move {
-                rt_copy2
-                    .spawn(rt_copy2.alloc(), async move {
-                        iter(rt_copy3.clone(), done_tx, ITER);
-                    })
-                    .unwrap();
-            })
-            .unwrap();
-        done_rx.recv().unwrap();
+        rt.spawn(async move {
+            let rt_clone = rt_copy.clone();
+            let send_clone = send_copy.clone();
+            let _ = rt_copy.spawn_priority(10, async move {
+                iter(rt_clone, send_clone, ITER);
+            });
+        });
+
+        let _ = recv.recv().unwrap();
+    });
+}
+
+#[bench]
+fn spawn_one_to_one(b: &mut Bencher) {
+    let _handle = startup_global_time_loop(100);
+
+    thread::sleep(Duration::from_millis(10000));
+
+    let rt = rt([1, 1]);
+    let (send, recv) = bounded(1);
+
+    b.iter(move || {
+        let rt0 = rt.clone();
+        let rt1 = rt.clone();
+        let rt2 = rt.clone();
+        let rt3 = rt.clone();
+
+        {
+            let counter = Arc::new(AtomicCounter(send.clone()));
+            let counter0 = counter.clone();
+            let counter1 = counter.clone();
+            let counter2 = counter.clone();
+            let counter3 = counter.clone();
+
+            thread::spawn(move || {
+                for _ in 0..2500 {
+                    let rt0_copy = rt0.clone();
+                    let counter_copy = counter0.clone();
+                    if let Err(e) = rt0.spawn(async move {
+                        let _ = rt0_copy.spawn_local(async move {
+                            counter_copy;
+                        });
+                    }) {
+                        panic!("!!!> spawn empty singale task failed, reason: {:?}", e);
+                    }
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 2500..5000 {
+                    let rt1_copy = rt1.clone();
+                    let counter_copy = counter1.clone();
+                    if let Err(e) = rt1.spawn(async move {
+                        let _ = rt1_copy.spawn_local(async move {
+                            counter_copy;
+                        });
+                    }) {
+                        panic!("!!!> spawn empty singale task failed, reason: {:?}", e);
+                    }
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 5000..7500 {
+                    let rt2_copy = rt2.clone();
+                    let counter_copy = counter2.clone();
+                    if let Err(e) = rt2.spawn(async move {
+                        let _ = rt2_copy.spawn_local(async move {
+                            counter_copy;
+                        });;
+                    }) {
+                        panic!("!!!> spawn empty singale task failed, reason: {:?}", e);
+                    }
+                }
+            });
+
+            thread::spawn(move || {
+                for _ in 7500..10000 {
+                    let rt3_copy = rt3.clone();
+                    let counter_copy = counter3.clone();
+                    if let Err(e) = rt3.spawn(async move {
+                        let _ = rt3_copy.spawn_local(async move {
+                            counter_copy;
+                        });
+                    }) {
+                        println!("!!!> spawn empty singale task failed, reason: {:?}", e);
+                    }
+                }
+            });
+        }
+
+        let _ = recv.clone().recv().unwrap();
     });
 }
