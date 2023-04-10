@@ -28,7 +28,7 @@ backtrace = "0.3"
 slotmap = "1.0"
 quanta = "0.10"
 log = "0.4"
-wrr = { path = "E:/rust/pi_mastser/pi_lib/wrr" }
+wrr = { package = "pi_wrr",  version = "0.1.1"}
 pi_hash = "0.1"
 pi_cancel_timer = "0.2"
 pi_timer = "0.1"
@@ -45,7 +45,6 @@ tokio = { version = "1.26", features = ["full"] }
 minstant = "0.1"
 
 [dev-dependencies]
-rand = "0.7"
 future-parking_lot = "0.3"
 futures-util = "0.3"
 tokio = { version = "1.26", features = ["full"] }
