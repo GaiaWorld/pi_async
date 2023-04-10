@@ -3,13 +3,6 @@
 
 use std::hint::spin_loop;
 
-pub mod mpmc_deque;
-pub mod mpsc_deque;
-pub mod steal_deque;
-pub mod spin_lock;
-pub mod mutex_lock;
-pub mod rw_lock;
-
 /*
 * 根据指定值进行自旋，返回下次自旋的值
 */

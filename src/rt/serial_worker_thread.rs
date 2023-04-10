@@ -1,28 +1,30 @@
 use std::future::Future;
-use std::io::{Error, ErrorKind, Result};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-use std::task::{Poll, Waker};
 use std::time::Duration;
+use std::task::{Poll, Waker};
+use std::io::{Error, Result, ErrorKind};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
+use parking_lot::{Mutex, Condvar};
+use futures::{future::{FutureExt, LocalBoxFuture},
+              stream::{Stream, LocalBoxStream}};
 use crossbeam_channel::Sender;
-use futures::{
-    future::{FutureExt, LocalBoxFuture},
-    stream::{LocalBoxStream, Stream},
-};
-use parking_lot::{Condvar, Mutex};
 
-use crate::rt::{
-    serial::{
-        spawn_worker_thread, wakeup_worker_thread, AsyncMapReduce, AsyncRuntime, AsyncRuntimeExt,
-        AsyncTask, AsyncTaskPool, AsyncTaskPoolExt, AsyncTaskTimer, AsyncTimingTask, AsyncWait,
-        AsyncWaitAny, AsyncWaitAnyCallback, LocalAsyncRuntime,
-    },
-    serial_single_thread::{SingleTaskPool, SingleTaskRunner, SingleTaskRuntime},
-    AsyncPipelineResult, TaskId,
-};
+use crate::rt::{TaskId, AsyncPipelineResult,
+                serial::{AsyncTask,
+                         AsyncTimingTask,
+                         AsyncTaskTimer,
+                         AsyncRuntime,
+                         AsyncRuntimeExt,
+                         AsyncTaskPool,
+                         AsyncTaskPoolExt,
+                         AsyncWait,
+                         AsyncWaitAny,
+                         AsyncWaitAnyCallback,
+                         AsyncMapReduce,
+                         LocalAsyncRuntime,
+                         spawn_worker_thread, wakeup_worker_thread},
+                YieldNow,
+                serial_single_thread::{SingleTaskPool, SingleTaskRunner, SingleTaskRuntime}};
 
 ///
 /// 工作者异步运行时
@@ -30,34 +32,34 @@ use crate::rt::{
 pub struct WorkerRuntime<
     O: Default + 'static = (),
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O> = SingleTaskPool<O>,
->(
-    Arc<(
-        Arc<AtomicBool>,                       //工作者状态
-        Arc<(AtomicBool, Mutex<()>, Condvar)>, //工作者线程唤醒器
-        SingleTaskRuntime<O, P>,               //单线程运行时
-    )>,
-);
+>(Arc<(
+    Arc<AtomicBool>,                        //工作者状态
+    Arc<(AtomicBool, Mutex<()>, Condvar)>,  //工作者线程唤醒器
+    SingleTaskRuntime<O, P>                 //单线程运行时
+)>);
 
-unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Send
-    for WorkerRuntime<O, P>
-{
-}
-unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Sync
-    for WorkerRuntime<O, P>
-{
-}
+unsafe impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
+> Send for WorkerRuntime<O, P> {}
+unsafe impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
+> Sync for WorkerRuntime<O, P> {}
 
-impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>> Clone
-    for WorkerRuntime<O, P>
-{
+impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O>,
+> Clone for WorkerRuntime<O, P> {
     fn clone(&self) -> Self {
         WorkerRuntime(self.0.clone())
     }
 }
 
-impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> AsyncRuntime<O>
-    for WorkerRuntime<O, P>
-{
+impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+> AsyncRuntime<O> for WorkerRuntime<O, P> {
     type Pool = P;
 
     /// 共享运行时内部任务池
@@ -86,54 +88,154 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
 
     /// 分配异步任务的唯一id
     #[inline]
-    fn alloc(&self) -> TaskId {
-        (self.0).2.alloc()
+    fn alloc<R: 'static>(&self) -> TaskId {
+        (self.0).2.alloc::<R>()
     }
 
     /// 派发一个指定的异步任务到异步运行时
-    fn spawn<F>(&self, task_id: TaskId, future: F) -> Result<()>
-    where
-        F: Future<Output = O> + 'static,
-    {
+    fn spawn<F>(&self, future: F) -> Result<TaskId>
+        where F: Future<Output = O> + 'static {
         if !(self.0).0.load(Ordering::SeqCst) {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "Spawn async task failed, reason: worker already closed",
-            ));
+            return Err(Error::new(ErrorKind::Other, "Spawn async task failed, reason: worker already closed"));
         }
 
-        let result = (self.0).2.spawn(task_id, future);
+        let result = (self.0).2.spawn(future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个异步任务到本地异步运行时，如果本地没有本异步运行时，则会派发到当前运行时中
+    fn spawn_local<F>(&self, future: F) -> Result<TaskId>
+        where
+            F: Future<Output = O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn local async task failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_local(future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定优先级的异步任务到异步运行时
+    fn spawn_priority<F>(&self, priority: usize, future: F) -> Result<TaskId>
+        where
+            F: Future<Output = O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn priority async task failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_priority(priority, future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个异步任务到异步运行时，并立即让出任务的当前运行
+    fn spawn_yield<F>(&self, future: F) -> Result<TaskId>
+        where
+            F: Future<Output = O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn yield priority async task failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_yield(future);
         wakeup_worker_thread(&(self.0).1, &(self.0).2);
         result
     }
 
     /// 派发一个在指定时间后执行的异步任务到异步运行时，时间单位ms
-    fn spawn_timing<F>(&self, task_id: TaskId, future: F, time: usize) -> Result<()>
-    where
-        F: Future<Output = O> + 'static,
-    {
+    fn spawn_timing<F>(&self, future: F, time: usize) -> Result<TaskId>
+        where F: Future<Output = O> + 'static {
         if !(self.0).0.load(Ordering::SeqCst) {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "Spawn timing async task failed, reason: worker already closed",
-            ));
+            return Err(Error::new(ErrorKind::Other, "Spawn timing async task failed, reason: worker already closed"));
         }
 
-        let result = (self.0).2.spawn_timing(task_id, future, time);
+        let result = (self.0).2.spawn_timing(future, time);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定任务唯一id的异步任务到异步运行时
+    fn spawn_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where
+            F: Future<Output=O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn async task by id failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_by_id(task_id, future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定任务唯一id的异步任务到本地异步运行时，如果本地没有本异步运行时，则会派发到当前运行时中
+    fn spawn_local_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where
+            F: Future<Output=O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn local async task by id failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_local_by_id(task_id, future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定任务唯一id和任务优先级的异步任务到异步运行时
+    fn spawn_priority_by_id<F>(&self,
+                               task_id: TaskId,
+                               priority: usize,
+                               future: F) -> Result<()>
+        where
+            F: Future<Output=O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn priority async task by id failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_priority_by_id(task_id, priority, future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定任务唯一id的异步任务到异步运行时，并立即让出任务的当前运行
+    fn spawn_yield_by_id<F>(&self, task_id: TaskId, future: F) -> Result<()>
+        where
+            F: Future<Output=O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn yield async task by id failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_yield_by_id(task_id, future);
+        wakeup_worker_thread(&(self.0).1, &(self.0).2);
+        result
+    }
+
+    /// 派发一个指定任务唯一id和在指定时间后执行的异步任务到异步运行时，时间单位ms
+    fn spawn_timing_by_id<F>(&self,
+                             task_id: TaskId,
+                             future: F,
+                             time: usize) -> Result<()>
+        where
+            F: Future<Output=O> + 'static {
+        if !(self.0).0.load(Ordering::SeqCst) {
+            return Err(Error::new(ErrorKind::Other, "Spawn timing async task by id failed, reason: worker already closed"));
+        }
+
+        let result = (self.0).2.spawn_timing_by_id(task_id, future, time);
         wakeup_worker_thread(&(self.0).1, &(self.0).2);
         result
     }
 
     /// 挂起指定唯一id的异步任务
     #[inline]
-    fn pending<Output>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output> {
-        (self.0).2.pending(task_id, waker)
+    fn pending<Output: 'static>(&self, task_id: &TaskId, waker: Waker) -> Poll<Output> {
+        (self.0).2.pending::<Output>(task_id, waker)
     }
 
     /// 唤醒指定唯一id的异步任务
     #[inline]
-    fn wakeup(&self, task_id: &TaskId) {
-        (self.0).2.wakeup(task_id);
+    fn wakeup<Output: 'static>(&self, task_id: &TaskId) {
+        (self.0).2.wakeup::<Output>(task_id);
     }
 
     /// 挂起当前异步运行时的当前任务，并在指定的其它运行时上派发一个指定的异步任务，等待其它运行时上的异步任务完成后，唤醒当前运行时的当前任务，并返回其它运行时上的异步任务的值
@@ -166,24 +268,29 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
         (self.0).2.timeout(timeout)
     }
 
+    /// 立即让出当前任务的执行
+    #[inline]
+    fn yield_now(&self) -> LocalBoxFuture<'static, ()> {
+        (self.0).2.yield_now()
+    }
+
     /// 生成一个异步管道，输入指定流，输入流的每个值通过过滤器生成输出流的值
     #[inline]
     fn pipeline<S, SO, F, FO>(&self, input: S, mut filter: F) -> LocalBoxStream<'static, FO>
-    where
-        S: Stream<Item = SO> + 'static,
-        SO: 'static,
-        F: FnMut(SO) -> AsyncPipelineResult<FO> + 'static,
-        FO: 'static,
-    {
+        where S: Stream<Item = SO> + 'static,
+              SO: 'static,
+              F: FnMut(SO) -> AsyncPipelineResult<FO> + 'static,
+              FO: 'static {
         (self.0).2.pipeline(input, filter)
     }
 
     /// 关闭异步运行时，返回请求关闭是否成功
     fn close(&self) -> bool {
         if cfg!(target_arch = "aarch64") {
-            if let Ok(true) =
-                (self.0).0.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-            {
+            if let Ok(true) = (self.0).0.compare_exchange(true,
+                                                          false,
+                                                          Ordering::SeqCst,
+                                                          Ordering::SeqCst) {
                 //设置工作者状态成功，检查运行时所在线程是否需要唤醒
                 wakeup_worker_thread(&(self.0).1, &(self.0).2);
                 true
@@ -191,9 +298,10 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
                 false
             }
         } else {
-            if let Ok(true) =
-                (self.0).0.compare_exchange_weak(true, false, Ordering::SeqCst, Ordering::SeqCst)
-            {
+            if let Ok(true) = (self.0).0.compare_exchange_weak(true,
+                                                               false,
+                                                               Ordering::SeqCst,
+                                                               Ordering::SeqCst) {
                 //设置工作者状态成功，检查运行时所在线程是否需要唤醒
                 wakeup_worker_thread(&(self.0).1, &(self.0).2);
                 true
@@ -204,46 +312,43 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> 
     }
 }
 
-impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> AsyncRuntimeExt<O>
-    for WorkerRuntime<O, P>
-{
+impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+> AsyncRuntimeExt<O> for WorkerRuntime<O, P> {
     #[inline]
-    fn spawn_with_context<F, C>(&self, task_id: TaskId, future: F, context: C) -> Result<()>
-    where
-        F: Future<Output = O> + 'static,
-        C: 'static,
-    {
+    fn spawn_with_context<F, C>(&self,
+                                task_id: TaskId,
+                                future: F,
+                                context: C) -> Result<()>
+        where F: Future<Output = O> + 'static,
+              C: 'static {
         (self.0).2.spawn_with_context(task_id, future, context)
     }
 
     #[inline]
-    fn spawn_timing_with_context<F, C>(
-        &self,
-        task_id: TaskId,
-        future: F,
-        context: C,
-        time: usize,
-    ) -> Result<()>
-    where
-        F: Future<Output = O> + 'static,
-        C: 'static,
-    {
+    fn spawn_timing_with_context<F, C>(&self,
+                                       task_id: TaskId,
+                                       future: F,
+                                       context: C,
+                                       time: usize) -> Result<()>
+        where F: Future<Output = O> + 'static,
+              C: 'static {
         (self.0).2.spawn_timing_with_context(task_id, future, context, time)
     }
 
     #[inline]
     fn block_on<F>(&self, future: F) -> Result<F::Output>
-    where
-        F: Future + 'static,
-        <F as Future>::Output: Default + 'static,
-    {
+        where F: Future + 'static,
+              <F as Future>::Output: Default + 'static {
         (self.0).2.block_on::<F>(future)
     }
 }
 
-impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
-    WorkerRuntime<O, P>
-{
+impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+> WorkerRuntime<O, P> {
     /// 获取工作者异步运行时的工作者状态
     pub fn get_worker_status(&self) -> &Arc<AtomicBool> {
         &(self.0).0
@@ -266,7 +371,7 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
             WorkerRuntime::<O, P>::get_id_raw,
             WorkerRuntime::<O, P>::spawn_raw,
             WorkerRuntime::<O, P>::spawn_timing_raw,
-            WorkerRuntime::<O, P>::timeout_raw,
+            WorkerRuntime::<O, P>::timeout_raw
         )
     }
 
@@ -280,12 +385,10 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
     #[inline]
     pub(crate) fn from_raw(raw: *const ()) -> Self {
         let inner = unsafe {
-            Arc::from_raw(
-                raw as *const (
-                    Arc<AtomicBool>,
-                    Arc<(AtomicBool, Mutex<()>, Condvar)>,
-                    SingleTaskRuntime<O, P>,
-                ),
+            Arc::from_raw(raw as *const (
+                Arc<AtomicBool>,
+                Arc<(AtomicBool, Mutex<()>, Condvar)>,
+                SingleTaskRuntime<O, P>),
             )
         };
         WorkerRuntime(inner)
@@ -300,27 +403,27 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
     }
 
     // 派发一个指定的异步任务到异步运行时
-    pub(crate) fn spawn_raw(raw: *const (), future: LocalBoxFuture<'static, O>) -> Result<()> {
+    pub(crate) fn spawn_raw(raw: *const (),
+                            future: LocalBoxFuture<'static, O>) -> Result<()> {
         let rt = WorkerRuntime::<O, P>::from_raw(raw);
-        let result = rt.spawn(rt.alloc(), future);
+        let result = rt.spawn_by_id(rt.alloc::<O>(), future);
         Arc::into_raw(rt.0); //避免提前释放
         result
     }
 
     // 定时派发一个指定的异步任务到异步运行时
-    pub(crate) fn spawn_timing_raw(
-        raw: *const (),
-        future: LocalBoxFuture<'static, O>,
-        timeout: usize,
-    ) -> Result<()> {
+    pub(crate) fn spawn_timing_raw(raw: *const (),
+                                   future: LocalBoxFuture<'static, O>,
+                                   timeout: usize) -> Result<()> {
         let rt = WorkerRuntime::<O, P>::from_raw(raw);
-        let result = rt.spawn_timing(rt.alloc(), future, timeout);
+        let result = rt.spawn_timing_by_id(rt.alloc::<O>(), future, timeout);
         Arc::into_raw(rt.0); //避免提前释放
         result
     }
 
     // 挂起当前异步运行时的当前任务，等待指定的时间后唤醒当前任务
-    pub(crate) fn timeout_raw(raw: *const (), timeout: usize) -> LocalBoxFuture<'static, ()> {
+    pub(crate) fn timeout_raw(raw: *const (),
+                              timeout: usize) -> LocalBoxFuture<'static, ()> {
         let rt = WorkerRuntime::<O, P>::from_raw(raw);
         let boxed = rt.timeout(timeout);
         Arc::into_raw(rt.0); //避免提前释放
@@ -334,69 +437,68 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
 pub struct WorkerTaskRunner<
     O: Default + 'static = (),
     P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P> = SingleTaskPool<O>,
->(
-    Arc<(
-        Arc<AtomicBool>,                       //工作者状态
-        Arc<(AtomicBool, Mutex<()>, Condvar)>, //工作者线程唤醒器
-        SingleTaskRunner<O, P>,                //单线程异步任务执行器
-        WorkerRuntime<O, P>,                   //工作者运行时
-    )>,
-);
+>(Arc<(
+    Arc<AtomicBool>,                        //工作者状态
+    Arc<(AtomicBool, Mutex<()>, Condvar)>,  //工作者线程唤醒器
+    SingleTaskRunner<O, P>,                 //单线程异步任务执行器
+    WorkerRuntime<O, P>,                    //工作者运行时
+)>);
 
-unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> Send
-    for WorkerTaskRunner<O, P>
-{
-}
-unsafe impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> Sync
-    for WorkerTaskRunner<O, P>
-{
-}
+unsafe impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+> Send for WorkerTaskRunner<O, P> {}
+unsafe impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+> Sync for WorkerTaskRunner<O, P> {}
 
-impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>> Clone
-    for WorkerTaskRunner<O, P>
-{
+impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+> Clone for WorkerTaskRunner<O, P> {
     fn clone(&self) -> Self {
         WorkerTaskRunner(self.0.clone())
     }
 }
 
-impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
-    From<(Arc<AtomicBool>, Arc<(AtomicBool, Mutex<()>, Condvar)>, SingleTaskRuntime<O, P>)>
-    for WorkerRuntime<O, P>
-{
+impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+> From<(Arc<AtomicBool>, Arc<(AtomicBool, Mutex<()>, Condvar)>, SingleTaskRuntime<O, P>)> for WorkerRuntime<O, P> {
     //将外部的工作者状态，工作者线程唤醒器和指定任务池的单线程异步运行时转换成工作者异步运行时
-    fn from(
-        from: (Arc<AtomicBool>, Arc<(AtomicBool, Mutex<()>, Condvar)>, SingleTaskRuntime<O, P>),
-    ) -> Self {
+    fn from(from: (Arc<AtomicBool>,
+                   Arc<(AtomicBool, Mutex<()>, Condvar)>,
+                   SingleTaskRuntime<O, P>,)) -> Self {
         WorkerRuntime(Arc::new(from))
     }
 }
 
 impl<O: Default + 'static> Default for WorkerTaskRunner<O> {
     fn default() -> Self {
-        WorkerTaskRunner::new(
-            SingleTaskPool::default(),
-            Arc::new(AtomicBool::new(true)),
-            Arc::new((AtomicBool::new(false), Mutex::new(()), Condvar::new())),
-        )
+        WorkerTaskRunner::new(SingleTaskPool::default(),
+                              Arc::new(AtomicBool::new(true)),
+                              Arc::new((AtomicBool::new(false), Mutex::new(()), Condvar::new())))
     }
 }
 
-impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
-    WorkerTaskRunner<O, P>
-{
+impl<
+    O: Default + 'static,
+    P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+> WorkerTaskRunner<O, P> {
     /// 用指定的任务池构建工作者任务执行器
-    pub fn new(
-        pool: P,
-        worker_status: Arc<AtomicBool>,
-        worker_waker: Arc<(AtomicBool, Mutex<()>, Condvar)>,
-    ) -> Self {
+    pub fn new(pool: P,
+               worker_status: Arc<AtomicBool>,
+               worker_waker: Arc<(AtomicBool, Mutex<()>, Condvar)>) -> Self {
         let runner = SingleTaskRunner::new(pool);
         let rt = runner.startup().unwrap();
         let inner = (worker_status.clone(), worker_waker.clone(), rt);
         let runtime = WorkerRuntime(Arc::new(inner));
 
-        let inner = (worker_status, worker_waker, runner, runtime);
+        let inner = (worker_status,
+                     worker_waker,
+                     runner,
+                     runtime);
 
         WorkerTaskRunner(Arc::new(inner))
     }
@@ -419,20 +521,16 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
     }
 
     /// 启动工作者异步任务执行器
-    pub fn startup<LF, GQL>(
-        self,
-        thread_name: &str,
-        thread_stack_size: usize,
-        sleep_timeout: u64,
-        loop_interval: Option<u64>,
-        loop_func: LF,
-        get_queue_len: GQL,
-    ) -> WorkerRuntime<O, P>
-    where
-        P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
-        LF: Fn() -> (bool, Duration) + Send + 'static,
-        GQL: Fn() -> usize + Send + 'static,
-    {
+    pub fn startup<LF, GQL>(self,
+                            thread_name: &str,
+                            thread_stack_size: usize,
+                            sleep_timeout: u64,
+                            loop_interval: Option<u64>,
+                            loop_func: LF,
+                            get_queue_len: GQL) -> WorkerRuntime<O, P>
+        where P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>,
+              LF: Fn() -> (bool, Duration) + Send + 'static,
+              GQL: Fn() -> usize + Send + 'static{
         let rt_copy = (self.0).3.clone();
         let thread_handler = (self.0).0.clone();
         let thread_waker = (self.0).1.clone();
@@ -444,7 +542,9 @@ impl<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool = P>>
             sleep_timeout,
             loop_interval,
             loop_func,
-            move || rt_copy.wait_len() + get_queue_len(),
+            move || {
+                rt_copy.wait_len() + get_queue_len()
+            },
         );
 
         (self.0).3.clone()

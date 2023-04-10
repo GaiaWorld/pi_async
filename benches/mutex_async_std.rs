@@ -8,7 +8,7 @@ use test::Bencher;
 
 #[bench]
 fn create(b: &mut Bencher) {
-    b.iter(|| Mutex::new(()));
+    b.iter(|| Arc::new(Mutex::new(())));
 }
 
 #[bench]
