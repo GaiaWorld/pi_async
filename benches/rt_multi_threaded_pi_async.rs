@@ -39,7 +39,7 @@ fn rt(weights: [u8; 2]) -> MultiTaskRuntime<(), StealableTaskPool<()>> {
 }
 
 #[bench]
-fn spawn_empty_many(b: &mut Bencher) {
+fn pi_async_spawn_empty_many(b: &mut Bencher) {
     let _handle = startup_global_time_loop(100);
 
     thread::sleep(Duration::from_millis(10000));
@@ -110,7 +110,7 @@ fn spawn_empty_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn await_empty_many(b: &mut Bencher) {
+fn pi_async_await_empty_many(b: &mut Bencher) {
     let _handle = startup_global_time_loop(100);
 
     thread::sleep(Duration::from_millis(10000));
@@ -168,7 +168,7 @@ fn await_empty_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn spawn_many(b: &mut Bencher) {
+fn pi_async_spawn_many(b: &mut Bencher) {
     let _handle = startup_global_time_loop(100);
 
     thread::sleep(Duration::from_millis(10000));
@@ -236,7 +236,7 @@ fn spawn_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn yield_many(b: &mut Bencher) {
+fn pi_async_yield_many(b: &mut Bencher) {
     let _handle = startup_global_time_loop(100);
 
     thread::sleep(Duration::from_millis(10000));
@@ -267,7 +267,7 @@ fn yield_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn ping_pong(b: &mut Bencher) {
+fn pi_async_ping_pong(b: &mut Bencher) {
     let _handle = startup_global_time_loop(100);
 
     thread::sleep(Duration::from_millis(10000));
@@ -314,7 +314,7 @@ fn ping_pong(b: &mut Bencher) {
 }
 
 #[bench]
-fn chained_spawn(b: &mut Bencher) {
+fn pi_async_chained_spawn(b: &mut Bencher) {
     let _handle = startup_global_time_loop(100);
 
     thread::sleep(Duration::from_millis(10000));
@@ -353,7 +353,7 @@ fn chained_spawn(b: &mut Bencher) {
 }
 
 #[bench]
-fn spawn_one_to_one(b: &mut Bencher) {
+fn pi_async_spawn_one_to_one(b: &mut Bencher) {
     let _handle = startup_global_time_loop(100);
 
     thread::sleep(Duration::from_millis(10000));

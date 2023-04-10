@@ -7,17 +7,17 @@ use async_std::task;
 use test::Bencher;
 
 #[bench]
-fn create(b: &mut Bencher) {
+fn async_std_create(b: &mut Bencher) {
     b.iter(|| Arc::new(Mutex::new(())));
 }
 
 #[bench]
-fn contention(b: &mut Bencher) {
+fn async_std_contention(b: &mut Bencher) {
     b.iter(|| task::block_on(run(10, 1000)));
 }
 
 #[bench]
-fn no_contention(b: &mut Bencher) {
+fn async_std_no_contention(b: &mut Bencher) {
     b.iter(|| task::block_on(run(1, 10000)));
 }
 

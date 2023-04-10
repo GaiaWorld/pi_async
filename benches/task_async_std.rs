@@ -13,12 +13,12 @@ use crossbeam_channel::{Sender, bounded};
 use async_std::task;
 
 #[bench]
-fn block_on(b: &mut Bencher) {
+fn async_std_block_on(b: &mut Bencher) {
     b.iter(|| task::block_on(async {}));
 }
 
 #[bench]
-fn local_spawn_many(b: &mut Bencher) {
+fn async_std_local_spawn_many(b: &mut Bencher) {
     const COUNT: usize = 10000;
 
     b.iter(|| {

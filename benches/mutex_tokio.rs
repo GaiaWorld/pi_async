@@ -8,12 +8,12 @@ use test::Bencher;
 use tokio::sync::Mutex;
 
 #[bench]
-fn create(b: &mut Bencher) {
+fn tokio_create(b: &mut Bencher) {
     b.iter(|| Arc::new(Mutex::new(())));
 }
 
 #[bench]
-fn contention(b: &mut Bencher) {
+fn tokio_contention(b: &mut Bencher) {
     let rt = Arc::new(contention_rt());
     b.iter(|| {
         let rt_copy = rt.clone();
@@ -30,7 +30,7 @@ fn contention_rt() -> tokio::runtime::Runtime {
 }
 
 #[bench]
-fn no_contention(b: &mut Bencher) {
+fn tokio_no_contention(b: &mut Bencher) {
     let rt = Arc::new(no_contention_rt());
 
     b.iter(|| {

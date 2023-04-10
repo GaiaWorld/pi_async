@@ -10,7 +10,7 @@ use test::Bencher;
 use crossbeam_channel::bounded;
 
 #[bench]
-fn bench_async_mutex(b: &mut Bencher) {
+fn async_std_bench_async_mutex(b: &mut Bencher) {
     b.iter(|| {
         let (s, r) = bounded(1);
 

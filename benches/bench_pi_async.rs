@@ -13,7 +13,7 @@ use pi_async::rt::{startup_global_time_loop, AsyncRuntime,
                    multi_thread::{StealableTaskPool, MultiTaskRuntime, MultiTaskRuntimeBuilder}};
 
 #[bench]
-fn bench_async_mutex(b: &mut Bencher) {
+fn pi_async_bench_async_mutex(b: &mut Bencher) {
     let _handle = startup_global_time_loop(100);
 
     thread::sleep(Duration::from_millis(10000));

@@ -16,7 +16,7 @@ fn rt() -> Runtime {
 }
 
 #[bench]
-fn bench_async_mutex(b: &mut Bencher) {
+fn tokio_bench_async_mutex(b: &mut Bencher) {
     let rt0 = Arc::new(rt());
 
     let rt1 = Arc::new(rt());

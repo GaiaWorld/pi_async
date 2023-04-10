@@ -15,7 +15,7 @@ use pi_async::rt::{AsyncRuntime, AsyncRuntimeExt,
                    serial_local_thread::{LocalTaskRunner, LocalTaskRuntime}};
 
 #[bench]
-fn block_on(b: &mut Bencher) {
+fn pi_async_block_on(b: &mut Bencher) {
     let rt = LocalTaskRunner::<()>::new().into_local();
 
     b.iter(|| {
@@ -36,7 +36,7 @@ fn rt() -> LocalTaskRuntime {
 }
 
 #[bench]
-fn local_spawn_many(b: &mut Bencher) {
+fn pi_async_local_spawn_many(b: &mut Bencher) {
     // use tracing_chrome::ChromeLayerBuilder;
     // use tracing_subscriber::{registry::Registry, prelude::*};
     //
@@ -60,7 +60,7 @@ fn local_spawn_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn local_send_many(b: &mut Bencher) {
+fn pi_async_local_send_many(b: &mut Bencher) {
     thread::sleep(Duration::from_millis(10000));
 
     const COUNT: usize = 10000;
@@ -84,7 +84,7 @@ fn local_send_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn local_run(b: &mut Bencher) {
+fn pi_async_local_run(b: &mut Bencher) {
     thread::sleep(Duration::from_millis(10000));
 
     const COUNT: usize = 10000;

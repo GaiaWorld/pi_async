@@ -15,13 +15,13 @@ fn rt() -> tokio::runtime::Runtime {
 }
 
 #[bench]
-fn block_on(b: &mut Bencher) {
+fn tokio_block_on(b: &mut Bencher) {
     let rt = rt();
     b.iter(|| rt.block_on(async {}));
 }
 
 #[bench]
-fn local_spawn_many(b: &mut Bencher) {
+fn tokio_local_spawn_many(b: &mut Bencher) {
     let rt = rt();
 
     const COUNT: usize = 10000;

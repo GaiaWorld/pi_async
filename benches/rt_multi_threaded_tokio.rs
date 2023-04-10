@@ -23,7 +23,7 @@ impl Drop for AtomicCounter {
 }
 
 #[bench]
-fn spawn_empty_many(b: &mut Bencher) {
+fn tokio_spawn_empty_many(b: &mut Bencher) {
     let rt = Arc::new(rt());
     let (send, recv) = bounded(1);
 
@@ -82,7 +82,7 @@ fn spawn_empty_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn await_empty_many(b: &mut Bencher) {
+fn tokio_await_empty_many(b: &mut Bencher) {
     let rt = Arc::new(rt());
     let (send, recv) = bounded(1);
 
@@ -141,7 +141,7 @@ fn await_empty_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn spawn_many(b: &mut Bencher) {
+fn tokio_spawn_many(b: &mut Bencher) {
     let rt = Arc::new(rt());
     let (send, recv) = bounded(1);
 
@@ -204,7 +204,7 @@ fn spawn_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn yield_many(b: &mut Bencher) {
+fn tokio_yield_many(b: &mut Bencher) {
     const NUM_YIELD: usize = 1_000;
     const TASKS: usize = 200;
 
@@ -232,7 +232,7 @@ fn yield_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn ping_pong(b: &mut Bencher) {
+fn tokio_ping_pong(b: &mut Bencher) {
     const NUM_PINGS: usize = 1_000;
 
     let rt = rt();
@@ -274,7 +274,7 @@ fn ping_pong(b: &mut Bencher) {
 }
 
 #[bench]
-fn chained_spawn(b: &mut Bencher) {
+fn tokio_chained_spawn(b: &mut Bencher) {
     const ITER: usize = 1_000;
 
     let rt = rt();
@@ -305,7 +305,7 @@ fn chained_spawn(b: &mut Bencher) {
 }
 
 #[bench]
-fn spawn_one_to_one(b: &mut Bencher) {
+fn tokio_spawn_one_to_one(b: &mut Bencher) {
     let rt = Arc::new(rt());
     let (send, recv) = bounded(1);
 

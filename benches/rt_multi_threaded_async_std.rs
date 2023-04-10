@@ -22,7 +22,7 @@ impl Drop for AtomicCounter {
 }
 
 #[bench]
-fn spawn_empty_many(b: &mut Bencher) {
+fn async_std_spawn_empty_many(b: &mut Bencher) {
     let (send, recv) = bounded(1);
 
     b.iter(move || {
@@ -75,7 +75,7 @@ fn spawn_empty_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn await_empty_many(b: &mut Bencher) {
+fn async_std_await_empty_many(b: &mut Bencher) {
     let (send, recv) = bounded(1);
 
     b.iter(move || {
@@ -128,7 +128,7 @@ fn await_empty_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn spawn_many(b: &mut Bencher) {
+fn async_std_spawn_many(b: &mut Bencher) {
     let (send, recv) = bounded(1);
 
     b.iter(move || {
@@ -181,7 +181,7 @@ fn spawn_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn yield_many(b: &mut Bencher) {
+fn async_std_yield_many(b: &mut Bencher) {
     const NUM_YIELD: usize = 1_000;
     const TASKS: usize = 200;
 
@@ -207,7 +207,7 @@ fn yield_many(b: &mut Bencher) {
 }
 
 #[bench]
-fn ping_pong(b: &mut Bencher) {
+fn async_std_ping_pong(b: &mut Bencher) {
     const NUM_PINGS: usize = 1_000;
 
     let rem = Arc::new(AtomicUsize::new(0));
@@ -247,7 +247,7 @@ fn ping_pong(b: &mut Bencher) {
 }
 
 #[bench]
-fn chained_spawn(b: &mut Bencher) {
+fn async_std_chained_spawn(b: &mut Bencher) {
     const ITER: usize = 1_000;
 
     fn iter(done_tx: mpsc::SyncSender<()>, n: usize) {
@@ -276,7 +276,7 @@ fn chained_spawn(b: &mut Bencher) {
 }
 
 #[bench]
-fn spawn_one_to_one(b: &mut Bencher) {
+fn async_std_spawn_one_to_one(b: &mut Bencher) {
     let (send, recv) = bounded(1);
 
     b.iter(move || {

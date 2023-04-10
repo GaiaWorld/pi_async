@@ -25,12 +25,12 @@ impl Drop for AtomicCounter {
 }
 
 #[bench]
-fn create(b: &mut Bencher) {
+fn pi_async_create(b: &mut Bencher) {
     b.iter(|| Arc::new(Mutex::new(())));
 }
 
 #[bench]
-fn contention(b: &mut Bencher) {
+fn pi_async_contention(b: &mut Bencher) {
     let _handle = startup_global_time_loop(100);
 
     thread::sleep(Duration::from_millis(10000));
@@ -75,7 +75,7 @@ async fn contention_run(rt: MultiTaskRuntime<(), StealableTaskPool<()>>, counter
 }
 
 #[bench]
-fn no_contention(b: &mut Bencher) {
+fn pi_async_no_contention(b: &mut Bencher) {
     let _handle = startup_global_time_loop(100);
 
     thread::sleep(Duration::from_millis(10000));
