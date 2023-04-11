@@ -9,10 +9,9 @@
 //! # Examples
 //!
 //! ```
-//! use pi_async::prelude::{SingleTaskPool, SingleTaskRunner};
-//! let pool = SingleTaskPool::default();
-//! let rt = SingleTaskRunner::<(), SingleTaskPool<()>>::new(pool).into_local();
-//! let _ = rt.block_on(async {});
+//! use pi_async::rt::{AsyncRuntime, AsyncRuntimeExt, serial_local_thread::{LocalTaskRunner, LocalTaskRuntime}};
+//! let rt = LocalTaskRunner::<()>::new().into_local();
+//! let _ = rt.block_on(async move {});
 //! ```
 
 use std::ptr::null_mut;

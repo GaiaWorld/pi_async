@@ -10,14 +10,6 @@
 //! [SingleTaskRunner]: struct.SingleTaskRunner.html
 //! [SingleTaskRuntime]: struct.SingleTaskRuntime.html
 //!
-//! # Examples
-//!
-//! ```
-//! use pi_async::prelude::{SingleTaskPool, SingleTaskRunner};
-//! let pool = SingleTaskPool::default();
-//! let rt = SingleTaskRunner::<(), SingleTaskPool<()>>::new(pool).into_local();
-//! let _ = rt.block_on(async {});
-//! ```
 
 use std::thread;
 use std::any::Any;

@@ -14,7 +14,7 @@
 //! use pi_async::prelude::{SingleTaskPool, SingleTaskRunner};
 //! let pool = SingleTaskPool::default();
 //! let rt = SingleTaskRunner::<(), SingleTaskPool<()>>::new(pool).into_local();
-//! let _ = rt.block_on(async {});
+//! let _ = rt.block_on(async move {});
 //! ```
 
 use std::thread;

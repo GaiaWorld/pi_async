@@ -18,13 +18,13 @@
 //! use pi_async::prelude::{MultiTaskRuntime, MultiTaskRuntimeBuilder, StealableTaskPool};
 //! use pi_async::rt::AsyncRuntimeExt;
 //!
-//! let pool = StealableTaskPool::with(4, 4);
+//! let pool = StealableTaskPool::with(4,100000,[1, 254],3000);
 //! let builer = MultiTaskRuntimeBuilder::new(pool)
 //!     .set_timer_interval(1)
 //!     .init_worker_size(4)
 //!     .set_worker_limit(4, 4);
 //! let rt = builer.build();
-//! let _ = rt.spawn(rt.alloc(), async move {});
+//! let _ = rt.spawn(async move {});
 //! ```
 
 use std::any::Any;
@@ -2012,4 +2012,3 @@ fn run_task<O: Default + 'static, P: AsyncTaskPoolExt<O> + AsyncTaskPool<O, Pool
         (runtime.0).1.push(task);
     }
 }
-

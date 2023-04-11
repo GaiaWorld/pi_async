@@ -17,18 +17,9 @@
 //!
 //! 本地异步运行时:
 //! ```
-//! use pi_async::rt::serial_local_thread::{LocalTaskRunner, LocalTaskRuntime};
-//! use pi_async::rt::AsyncRuntimeExt;
+//! use pi_async::rt::{AsyncRuntime, AsyncRuntimeExt, serial_local_thread::{LocalTaskRunner, LocalTaskRuntime}};
 //! let rt = LocalTaskRunner::<()>::new().into_local();
-//! rt.block_on(async {});
-//! ```
-//!
-//! 单线程异步运行时使用:
-//! ```
-//! use pi_async::prelude::{SingleTaskPool, SingleTaskRunner};
-//! let pool = SingleTaskPool::default();
-//! let rt = SingleTaskRunner::<(), SingleTaskPool<()>>::new(pool).into_local();
-//! let _ = rt.block_on(async {});
+//! let _ = rt.block_on(async move {});
 //! ```
 //!
 //! 多线程异步运行时使用:
@@ -36,13 +27,13 @@
 //! use pi_async::prelude::{MultiTaskRuntime, MultiTaskRuntimeBuilder, StealableTaskPool};
 //! use pi_async::rt::AsyncRuntimeExt;
 //!
-//! let pool = StealableTaskPool::with(4, 4);
+//! let pool = StealableTaskPool::with(4,100000,[1, 254],3000);
 //! let builer = MultiTaskRuntimeBuilder::new(pool)
 //!     .set_timer_interval(1)
 //!     .init_worker_size(4)
 //!     .set_worker_limit(4, 4);
 //! let rt = builer.build();
-//! let _ = rt.spawn(rt.alloc(), async move {});
+//! let _ = rt.spawn(async move {});
 //! ```
 //!
 //! # Features
