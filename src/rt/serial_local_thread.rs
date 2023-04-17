@@ -167,7 +167,7 @@ impl<O: Default + 'static> LocalTaskRuntime<O> {
         output.boxed_local()
     }
 
-    fn block_on<F>(&self, future: F) -> IOResult<F::Output>
+    pub fn block_on<F>(&self, future: F) -> IOResult<F::Output>
         where F: Future + 'static,
               <F as Future>::Output: Default + 'static {
         let (sender, receiver) = bounded(1);

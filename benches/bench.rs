@@ -1,67 +1,146 @@
 #![feature(test)]
 extern crate test;
 
+use std::thread;
 use test::Bencher;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use pi_async::rt::multi_thread::{MultiTaskPool, MultiTaskRuntime};
-use pi_async::rt::{AsyncRuntime, AsyncValue};
+use crossbeam_channel::{Sender, bounded, unbounded};
+use tokio::{runtime, spawn};
+
+use pi_async::rt::AsyncRuntime;
+use pi_async::rt::serial::AsyncRuntime as SerialAsyncRuntime;
+use pi_async::rt::serial_local_thread::LocalTaskRunner;
+use pi_async::rt::single_thread::SingleTaskRunner;
+use pi_async::rt::multi_thread::{ComputationalTaskPool, MultiTaskRuntimeBuilder};
 use pi_async::lock::mutex_lock::Mutex;
 
-use crossbeam_channel::{bounded, unbounded};
-
+#[derive(Clone)]
+struct AtomicCounter(Arc<Sender<()>>);
+impl Drop for AtomicCounter {
+    fn drop(&mut self) {
+        self.0.send(()); //通知执行完成
+    }
+}
 
 #[bench]
-fn bench_async_mutex(b: &mut Bencher) {
-    let pool0 = MultiTaskPool::new("Bencher-Runtime".to_string(), 1, 1024 * 1024, 10, None);
-    let rt0: MultiTaskRuntime<()> = pool0.startup(false);
+fn bench_spawn_by_local(b: &mut Bencher) {
+    let runner = LocalTaskRunner::new();
+    let rt = runner.get_runtime();
 
-    let pool1 = MultiTaskPool::new("Bencher-Runtime".to_string(), 1, 1024 * 1024, 10, None);
-    let rt1: MultiTaskRuntime<()> = pool1.startup(false);
+    let (sender, receiver) = unbounded();
+    let counter = AtomicCounter(Arc::new(sender));
 
     b.iter(|| {
-        let rt0_copy = rt0.clone();
-        let rt1_copy = rt1.clone();
-
-        let (s, r) = bounded(1);
-
-        let shared = Arc::new(Mutex::new(0));
-
-        for _ in 0..1 {
-            let s0_copy = s.clone();
-            let shared0_copy = shared.clone();
-            rt0_copy.spawn(rt0_copy.alloc(), async move {
-                for _ in 0..500 {
-                    let mut v = shared0_copy.lock().await;
-                    if *v >= 999 {
-                        *v += 1;
-                        s0_copy.send(());
-                    } else {
-                        *v += 1;
-                    }
-                }
-            });
+        for _ in 0..100000 {
+            let counter_copy = counter.clone();
+            rt.spawn(async move {
+                         counter_copy;
+                     });
+            runner.run_once();
         }
 
-        for _ in 0..1 {
-            let s1_copy = s.clone();
-            let shared1_copy = shared.clone();
-            rt1_copy.spawn(rt1_copy.alloc(), async move {
-                for _ in 0..500 {
-                    let mut v = shared1_copy.lock().await;
-                    if *v >= 999 {
-                        *v += 1;
-                        s1_copy.send(());
-                    } else {
-                        *v += 1;
-                    }
-                }
-            });
+        let _ = receiver.recv().unwrap();
+    });
+}
+
+#[bench]
+fn bench_spawn_by_single(b: &mut Bencher) {
+    let runner = SingleTaskRunner::default();
+    let rt = runner.startup().unwrap();
+
+    thread::spawn(move || {
+        loop {
+            if let Err(e) = runner.run() {
+                println!("!!!!!!run failed, reason: {:?}", e);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    let (sender, receiver) = unbounded();
+    let counter = AtomicCounter(Arc::new(sender));
+
+    b.iter(|| {
+        for _ in 0..100000 {
+            let counter_copy = counter.clone();
+            rt.spawn(rt.alloc(),
+                     async move {
+                         counter_copy;
+                     });
         }
 
-        if let Err(_) = r.recv_timeout(Duration::from_millis(10000)) {
-            println!("!!!!!!recv timeout, len: {:?}", (rt0.len(), rt1.len()));
+        let _ = receiver.recv().unwrap();
+    });
+}
+
+#[bench]
+fn bench_spawn_by_multi(b: &mut Bencher) {
+    let rt = MultiTaskRuntimeBuilder::default()
+        .init_worker_size(4)
+        .set_worker_limit(4, 4)
+        .set_timeout(1)
+        .build();
+    let (sender, receiver) = unbounded();
+    let counter = AtomicCounter(Arc::new(sender));
+
+    b.iter(|| {
+        for _ in 0..100000 {
+            let counter_copy = counter.clone();
+            rt.spawn(rt.alloc(),
+                     async move {
+                         counter_copy;
+                     });
         }
+
+        let _ = receiver.recv().unwrap();
+    });
+}
+
+#[bench]
+fn bench_spawn_by_single_for_tokio(b: &mut Bencher) {
+    let rt = runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let (sender, receiver) = unbounded();
+    let counter = AtomicCounter(Arc::new(sender));
+
+    b.iter(|| {
+        let counter_copy = counter.clone();
+        rt.block_on(async move {
+            for _ in 0..100000 {
+                let counter_clone = counter_copy.clone();
+                spawn(async move {
+                    counter_clone;
+                });
+            }
+        });
+
+        let _ = receiver.recv().unwrap();
+    });
+}
+
+#[bench]
+fn bench_spawn_by_multi_for_tokio(b: &mut Bencher) {
+    let rt = runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_time()
+        .build()
+        .unwrap();
+    let (sender, receiver) = unbounded();
+    let counter = AtomicCounter(Arc::new(sender));
+
+    b.iter(|| {
+        for _ in 0..100000 {
+            let counter_copy = counter.clone();
+            rt.spawn(async move {
+                         counter_copy;
+                     });
+        }
+
+        let _ = receiver.recv().unwrap();
     });
 }
