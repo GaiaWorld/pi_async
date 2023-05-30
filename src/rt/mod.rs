@@ -11,14 +11,14 @@ use std::sync::{Arc, Weak};
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 use std::ptr::{null, null_mut};
+use std::ops::{Deref, DerefMut};
 use std::cell::{RefCell, UnsafeCell};
 use std::panic::{PanicInfo, set_hook};
 use std::task::{Waker, Context, Poll};
 use std::io::{Error, Result, ErrorKind};
-use std::alloc::{Layout, set_alloc_error_hook};
 use std::time::{Duration, SystemTime};
+use std::alloc::{Layout, set_alloc_error_hook};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
-use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, AtomicIsize, AtomicPtr, Ordering};
 
 pub mod single_thread;
@@ -978,6 +978,14 @@ unsafe impl<V: Send + 'static> Sync for AsyncValueNonBlocking<V> {}
 impl<V: Send + 'static> Clone for AsyncValueNonBlocking<V> {
     fn clone(&self) -> Self {
         AsyncValueNonBlocking(self.0.clone())
+    }
+}
+
+impl<V: Send + 'static> Debug for AsyncValueNonBlocking<V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f,
+               "AsyncValueNonBlocking[status = {}]",
+               self.0.status.load(Ordering::Acquire))
     }
 }
 
