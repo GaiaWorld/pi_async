@@ -1,6 +1,6 @@
 [package]
 name = "pi_async"
-version = "0.5.15"
+version = "0.5.16"
 authors = ["vmos <vmos@fairblock.io>"]
 edition = "2018"
 description = "Based on future (MVP), a universal asynchronous runtime and tool used to provide a foundation for the outside world"
